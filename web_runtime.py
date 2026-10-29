@@ -1,0 +1,1442 @@
+"""Runtime headless cho giao diện web, tái sử dụng nguyên pipeline AI hiện có."""
+
+from __future__ import annotations
+
+import pickle
+import math
+import re
+import threading
+import time
+import tempfile
+import unicodedata
+from collections import deque
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from door_service import DoorService
+from config import (
+    DATA_FACES_DIR,
+    ENROLLMENT_EMBEDDING_SAMPLES,
+    ENROLLMENT_MIN_SAMPLES,
+    ENROLLMENT_SESSION_IDLE_TIMEOUT_SECONDS,
+    KIOSK_ATTENDANCE_COOLDOWN_SECONDS,
+)
+from mixins.attendance import AttendanceMixin
+from mixins.camera import CameraMixin
+from mixins.core import CoreMixin
+from mixins.enrollment import EnrollmentMixin
+
+
+class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMixin):
+    """Cầu nối trạng thái; quyết định AI vẫn chạy trong các mixin gốc."""
+
+    def __init__(self, load_ai: bool = True):
+        self._lock = threading.RLock()
+        self._event_version = 0
+        self._started = False
+        self._load_ai_requested = load_ai
+
+        self.camera_cap = None
+        self.camera_running = False
+        self.current_frame = None
+        self.latest_processed_frame = None
+        self.camera_thread = None
+        self.current_fps = 0.0
+        self.current_conf = 0.0
+        self.current_page = "attendance"
+        self._current_frame_id = 0
+        self._last_cached_frame_id = -1
+        self._last_cached_jpeg = None
+        self._last_jpeg_encoded_at = 0.0
+        self._jpeg_lock = threading.Lock()
+        self._jpeg_min_interval = 1.0 / 20.0
+        self._display_jpeg_lock = threading.Lock()
+        self._display_cached_frame_id = -1
+        self._display_cached_jpeg = None
+        self._display_jpeg_encoded_at = 0.0
+        # Ban thu dong bo camera Wi-Fi va TFT o 5 FPS. Firmware TFT poll moi
+        # 200 ms nen khong tao request thua
+        # hay backlog TCP. Frame trung van duoc tai su dung tu cache ben duoi.
+        self._display_jpeg_min_interval = 1.0 / 5.0
+
+        self.kiosk_running = False
+        self.is_recognizing = False
+        self.kiosk_latest_frame = None
+        self.kiosk_fps = 0.0
+        self.kiosk_face_count = 0
+        self.kiosk_thread = None
+        self._kiosk_thread_token = 0
+        self._kiosk_waiting_for_departure = False
+        self._kiosk_idle_reset_pending = False
+        self._kiosk_face_stable_since = None
+        self._kiosk_face_absent_since = None
+        self._kiosk_active_face_area = None
+        self._kiosk_active_face_box = None
+        self._kiosk_suppressed_face_tracks = []
+        self._kiosk_result_hold_until = 0.0
+        self._kiosk_unknown_attempts = 0
+        self._kiosk_strict_candidate_id = None
+        self._kiosk_strict_confirmations = 0
+        self._kiosk_strict_attempts = 0
+        self._kiosk_strict_started_at = None
+        self._kiosk_strict_distances = []
+        self._kiosk_strict_margins = []
+        self._kiosk_query_embeddings = []
+        self._kiosk_query_started_at = None
+        self._kiosk_query_face_box = None
+        self._attendance_cooldowns = {}
+        self._is_kiosk_ui_idle = True
+        self._fingerprint_access_state = None
+        self._fingerprint_access_until = 0.0
+        self.door_service = DoorService.from_environment(
+            on_change=self._publish,
+            on_event=self._on_door_event,
+        )
+
+        self.enrollment_running = False
+        self.is_face_valid = False
+        self.ai_status_text = "Dua mat vao khung hinh"
+        self.prev_status = None
+        self.enrollment_face_samples = deque(maxlen=ENROLLMENT_EMBEDDING_SAMPLES)
+        self._last_enrollment_sample_at = 0.0
+        self._enrollment_valid_since = None
+        self.enrollment_capture_ready = False
+        self.enrollment_captured_samples = []
+        self.enrollment_captured_frame = None
+        self.enrollment_captured_face = None
+        self._enrollment_waiting_for_face_leave = False
+        self._enrollment_saving = False
+        self._enrollment_continuous_session = False
+        self._enrollment_scan_armed = False
+        self._enrollment_idle_timer = None
+        self._enrollment_idle_deadline = None
+        self.current_face_brightness = None
+        self.is_face_bright = False
+
+        self.face_model = None
+        self.face_detector = None
+        self.device = "cpu"
+        self.shape_rect = None
+        self.constraint_box = None
+        self.ekyc_mask = None
+        self.frame_width = 640
+        self.frame_height = 480
+        self.embeddings_cache = None
+        self.attendance_history = []
+        self._attendance_history_version = 0
+
+        self.recognition_state = self._idle_payload()
+        self.enrollment_result = {
+            "state": "idle",
+            "title": "Chờ khuôn mặt hợp lệ",
+            "message": "Giữ yên khuôn mặt trong 3 giây để hệ thống tự động quét.",
+        }
+        self.recognition_test_result = {
+            "version": 0, "state": "idle", "result": None, "error": None
+        }
+
+        Path(DATA_FACES_DIR).mkdir(parents=True, exist_ok=True)
+        Path("data").mkdir(parents=True, exist_ok=True)
+        self._load_attendance_history()
+
+    @staticmethod
+    def _idle_payload():
+        return {
+            "state": "idle",
+            "title": "Chờ xác thực",
+            "message": "Đưa khuôn mặt vào khung để xác minh quyền truy cập",
+            "employee": None,
+            "timestamp": None,
+            "metrics": None,
+        }
+
+    def start(self):
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+        self._sync_door_events_to_attendance_history()
+        self.door_service.start()
+        if self._load_ai_requested:
+            self._load_ai_models()
+            self._start_camera()
+        else:
+            self.embeddings_cache = self._read_profiles()
+        self._publish()
+
+    def shutdown(self):
+        self._stop_continuous_enrollment_session()
+        self.kiosk_running = False
+        self.enrollment_running = False
+        self.camera_running = False
+        for worker in (self.kiosk_thread, self.camera_thread):
+            if worker is not None and worker.is_alive():
+                worker.join(timeout=0.8)
+        if self.camera_cap is not None:
+            self.camera_cap.release()
+            self.camera_cap = None
+        if self.face_detector is not None:
+            try:
+                self.face_detector.close()
+            except Exception:
+                pass
+        self.door_service.shutdown()
+
+    def after(self, _delay_ms, callback, *args):
+        """Tương thích callback Tk; web runtime không có main-loop widget."""
+        callback(*args)
+
+    def _safe_after(self, _delay_ms, callback, *args):
+        callback(*args)
+
+    def _publish(self):
+        with self._lock:
+            self._event_version += 1
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "version": self._event_version,
+                "mode": self.current_page,
+                "camera": {
+                    "running": bool(self.camera_running),
+                    "fps": round(float(
+                        self.kiosk_fps if self.current_page == "attendance"
+                        else self.current_fps
+                    ), 1),
+                    "confidence": round(float(self.current_conf), 3),
+                    "brightness": (
+                        round(float(self.current_face_brightness) / 255.0 * 100.0, 1)
+                        if self.current_face_brightness is not None else None
+                    ),
+                    "light_ok": bool(self.is_face_bright),
+                    "faces": int(self.kiosk_face_count),
+                    "device": self.device,
+                },
+                "recognition": dict(self.recognition_state),
+                "access": self._access_snapshot(),
+                "door": self.door_service.snapshot(),
+                "recognition_test": dict(self.recognition_test_result),
+                "enrollment": {
+                    **self.enrollment_result,
+                    "capture_ready": bool(self.enrollment_capture_ready),
+                    "saving": bool(self._enrollment_saving),
+                    "sample_count": len(
+                        self.enrollment_captured_samples
+                        if self.enrollment_capture_ready
+                        else self.enrollment_face_samples
+                    ),
+                    "sample_target": ENROLLMENT_EMBEDDING_SAMPLES,
+                    "status_text": self.ai_status_text,
+                    "session_active": bool(self._enrollment_continuous_session),
+                    "scan_armed": bool(self._enrollment_scan_armed),
+                    "idle_timeout_seconds": ENROLLMENT_SESSION_IDLE_TIMEOUT_SECONDS,
+                    "idle_remaining_seconds": (
+                        max(0, math.ceil(self._enrollment_idle_deadline - time.monotonic()))
+                        if self._enrollment_idle_deadline is not None else None
+                    ),
+                },
+                "history_version": self._attendance_history_version,
+            }
+
+    def _access_snapshot(self):
+        """Return one product-facing result for face and fingerprint access."""
+        if (
+            self._fingerprint_access_state is not None
+            and time.monotonic() < self._fingerprint_access_until
+        ):
+            return dict(self._fingerprint_access_state)
+
+        face = dict(self.recognition_state)
+        state = str(face.get("state") or "idle")
+        if state == "idle":
+            face.update({
+                "title": "Chờ xác thực",
+                "message": "Sử dụng khuôn mặt hoặc vân tay để xác minh quyền ra vào",
+            })
+        if state in {"success", "duplicate"}:
+            access_state, access_label = "allowed", "Đã cho phép ra vào"
+        elif state in {"unknown", "ambiguous"}:
+            access_state, access_label = "denied", "Không được phép ra vào"
+        elif state == "error":
+            access_state, access_label = "error", "Không thể xác thực"
+        elif state in {"recognizing", "strict_confirmation", "validating"}:
+            access_state, access_label = "processing", "Đang xác thực..."
+        else:
+            access_state, access_label = "waiting", "Sẵn sàng xác thực"
+        face.update({
+            "method": None if state == "idle" else "face",
+            "method_label": "Khuôn mặt hoặc vân tay" if state == "idle" else "Khuôn mặt",
+            "access_state": access_state,
+            "access_label": access_label,
+        })
+        return face
+
+    def _employee_for_fingerprint(self, registered, fingerprint_id):
+        employee_id = str(registered.get("employee_id") or "").strip()
+        if not employee_id:
+            employee_id = f"VT{fingerprint_id:03d}"
+        profile = None
+        if employee_id:
+            profiles = self.embeddings_cache
+            if profiles is None:
+                profiles = self._read_profiles()
+                self.embeddings_cache = profiles
+            for key, candidate in profiles.items():
+                if str(candidate.get("id") or key) == employee_id:
+                    profile = candidate
+                    break
+        if profile is not None:
+            image = self._profile_image(employee_id, profile)
+            return {
+                "id": employee_id,
+                "name": profile.get("name") or registered.get("name") or "Nhân viên",
+                "role": profile.get("role") or "Nhân viên",
+                "department": profile.get("department") or profile.get("dept") or "—",
+                "image_url": (
+                    self._employee_image_url(employee_id, profile)
+                    if image is not None else None
+                ),
+            }
+        return {
+            "id": employee_id,
+            "name": registered.get("name") or f"Vân tay #{fingerprint_id}",
+            "role": registered.get("role") or "Nhân viên",
+            "department": registered.get("department") or "—",
+            "image_url": None,
+        }
+
+    def door_events(self):
+        """Return newest controller events first for the admin API."""
+        return {
+            "device_id": self.door_service.device_id,
+            "items": self.door_service.events(),
+        }
+
+    @staticmethod
+    def _display_ascii(value):
+        """Rut gon chu Viet thanh ASCII de font nho tren TFT hien thi on dinh."""
+        text = unicodedata.normalize("NFD", str(value or ""))
+        return "".join(char for char in text if unicodedata.category(char) != "Mn").replace("đ", "d").replace("Đ", "D")
+
+    def display_snapshot(self):
+        """Payload nhe danh rieng cho man hinh kiosk ESP32-035."""
+        state = self.snapshot()
+        mode = state["mode"]
+        camera = state["camera"]
+        if mode == "add_employee":
+            source = state["enrollment"]
+            capture_ready = bool(source.get("capture_ready"))
+            screen_state = "ready" if capture_ready else source.get("state", "idle")
+            title = "KHUON MAT DAT YEU CAU" if capture_ready else source.get("title")
+            message = source.get("message") or source.get("status_text")
+            employee = None
+        else:
+            source = state["recognition"]
+            screen_state = source.get("state", "idle")
+            terminal_states = {"success", "duplicate", "unknown", "ambiguous", "error"}
+            if screen_state not in terminal_states:
+                # The small kiosk screen should not flicker through detector and
+                # validation states. It changes only for a final pass/fail result.
+                source = {
+                    "state": "idle",
+                    "title": "Nhìn thẳng vào camera",
+                    "message": "",
+                }
+                screen_state = "idle"
+            # Khi da nhan dien nhan vien (ke ca luot quet lai "duplicate" trong thoi gian cooldown),
+            # man hinh luon the hien trang thai thanh cong de hien thi mau xanh OK
+            if screen_state == "duplicate":
+                screen_state = "success"
+            title = source.get("title")
+            message = source.get("message")
+            employee = source.get("employee") or {}
+        return {
+            "version": state["version"],
+            "mode": mode,
+            "state": screen_state,
+            "title": self._display_ascii(title).upper(),
+            "message": self._display_ascii(message),
+            "name": self._display_ascii(employee.get("name", "")) if employee else "",
+            "employee_id": self._display_ascii(employee.get("id", "")) if employee else "",
+            "fps": camera.get("fps", 0),
+            "brightness": camera.get("brightness"),
+            "light_ok": camera.get("light_ok", False),
+            "faces": camera.get("faces", 0),
+            "sample_count": source.get("sample_count", 0) if mode == "add_employee" else 0,
+            "sample_target": source.get("sample_target", 0) if mode == "add_employee" else 0,
+        }
+
+    def display_jpeg_frame(self):
+        """Dong bo frame toan man hinh 480x320 giong y het 100% tren may tinh."""
+        with self._display_jpeg_lock:
+            frame = None
+            if self.current_page == "attendance":
+                # Anh diem danh phu kin vung camera cua TFT. Camera goc va
+                # frame AI van duoc xu ly doc lap tren laptop.
+                target_width, target_height = 480, 250
+                if self.kiosk_latest_frame is not None:
+                    frame = self.kiosk_latest_frame
+            else:
+                # Che do dang ky eKYC: lay truc tiep frame laptop, dung toan man hinh 480x320
+                target_width, target_height = 480, 320
+                if self.latest_processed_frame is not None:
+                    frame = self.latest_processed_frame
+                elif self.current_frame is not None:
+                    frame = self.current_frame
+            if frame is None:
+                return 0, None
+
+            frame_id = getattr(self, "_current_frame_id", 0)
+            now = time.perf_counter()
+            if self._display_cached_jpeg is not None and (
+                frame_id == self._display_cached_frame_id
+                or now - self._display_jpeg_encoded_at < self._display_jpeg_min_interval
+            ):
+                return self._display_cached_frame_id, self._display_cached_jpeg
+
+            # Resize dung kich thuoc tuong ung tung che do:
+            # - Diem danh: 480x250 (danh 70px cho bang trang thai phia duoi)
+            # - Dang ky: 480x320 (toan man hinh, khong con vung den, mat va cam giong y het laptop)
+            # Nguon ESP32 la QVGA, trong khi TFT rong 480 px. INTER_CUBIC giu
+            # duong net khuon mat/chu ro hon khi phong anh ma khong tang tai TFT.
+            resized = cv2.resize(
+                frame,
+                (target_width, target_height),
+                interpolation=cv2.INTER_CUBIC,
+            )
+
+            # JPEG nhe hon giup ESP32 tai va giai ma nhanh hon. Chat luong AI
+            # khong bi anh huong vi AI van xu ly frame goc o tren.
+            ok, encoded = cv2.imencode(
+                ".jpg",
+                resized,
+                [
+                    cv2.IMWRITE_JPEG_QUALITY,
+                    50,
+                    cv2.IMWRITE_JPEG_OPTIMIZE,
+                    1,
+                ],
+            )
+            # Canh nhieu chi tiet co the lam JPEG tang dot bien. Giu tran 16 KB
+            # de TFT van tai + giai ma du nhanh, nhung binh thuong
+            # van su dung quality 50 ro net hon.
+            if ok and encoded.nbytes > 16_000:
+                ok, encoded = cv2.imencode(
+                    ".jpg",
+                    resized,
+                    [
+                        cv2.IMWRITE_JPEG_QUALITY,
+                        42,
+                        cv2.IMWRITE_JPEG_OPTIMIZE,
+                        1,
+                    ],
+                )
+            if not ok:
+                return frame_id, None
+            self._display_cached_jpeg = encoded.tobytes()
+            self._display_cached_frame_id = frame_id
+            self._display_jpeg_encoded_at = now
+            return frame_id, self._display_cached_jpeg
+
+    def switch_mode(self, mode: str):
+        if mode not in {"attendance", "add_employee", "idle"}:
+            return self.snapshot()
+        completed_enrollment = bool(
+            mode == "attendance"
+            and self.current_page == "add_employee"
+            and self.enrollment_result.get("state") == "success"
+        )
+        if mode != "add_employee":
+            self._stop_continuous_enrollment_session()
+        with self._lock:
+            if self.current_page == mode and (
+                (mode == "attendance" and self.kiosk_running)
+                or (mode == "add_employee" and self.enrollment_running)
+                or (mode == "idle" and not self.kiosk_running and not self.enrollment_running)
+            ):
+                return self.snapshot()
+            self.kiosk_running = False
+            self.enrollment_running = False
+        for worker in (self.kiosk_thread, self.camera_thread):
+            if worker is not None and worker.is_alive():
+                worker.join(timeout=0.5)
+        self.current_page = mode
+        with self._jpeg_lock:
+            self._last_cached_frame_id = -1
+            self._last_cached_jpeg = None
+            self._last_jpeg_encoded_at = 0.0
+        if self.camera_running and mode != "idle":
+            if mode == "attendance":
+                self._start_kiosk_worker()
+            else:
+                self.enrollment_running = True
+                self.camera_thread = threading.Thread(
+                    target=self._camera_loop, daemon=True
+                )
+                self.camera_thread.start()
+        if completed_enrollment:
+            self.enrollment_result = {
+                "state": "idle",
+                "title": "Chờ khuôn mặt hợp lệ",
+                "message": "Nhập thông tin nhân viên tiếp theo để bắt đầu lượt quét mới.",
+            }
+        self._publish()
+        return self.snapshot()
+
+    def camera_jpeg_frame(self):
+        """Trả một JPEG dùng chung cho mọi client, tối đa 20 lần nén mỗi giây."""
+        with self._jpeg_lock:
+            frame = None
+            if self.current_page == "attendance":
+                if self.kiosk_latest_frame is not None:
+                    frame = self.kiosk_latest_frame
+            elif self.latest_processed_frame is not None:
+                frame = self.latest_processed_frame
+            if frame is None:
+                return 0, None
+
+            frame_id = getattr(self, "_current_frame_id", 0)
+            cached_id = getattr(self, "_last_cached_frame_id", -1)
+            cached_bytes = getattr(self, "_last_cached_jpeg", None)
+            now = time.perf_counter()
+
+            if cached_bytes is not None and (
+                frame_id == cached_id
+                or now - self._last_jpeg_encoded_at < self._jpeg_min_interval
+            ):
+                return cached_id, cached_bytes
+
+            ok, encoded = cv2.imencode(
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80]
+            )
+            if ok:
+                cached_bytes = encoded.tobytes()
+                self._last_cached_frame_id = frame_id
+                self._last_cached_jpeg = cached_bytes
+                self._last_jpeg_encoded_at = now
+                return frame_id, cached_bytes
+            return frame_id, None
+
+    def camera_preview_jpeg_frame(self):
+        """Prefer the source JPEG for a smooth attendance preview.
+
+        Enrollment keeps the processed image because its guide overlays are part
+        of the capture workflow. Non-MJPEG cameras transparently fall back to
+        the existing processed-frame encoder.
+        """
+        if self.current_page == "attendance":
+            latest_jpeg = getattr(self.camera_cap, "latest_jpeg", None)
+            if callable(latest_jpeg):
+                frame_id, frame = latest_jpeg()
+                if frame:
+                    return frame_id, frame
+        return self.camera_jpeg_frame()
+
+
+
+    # ---------- Callback nhận diện: chỉ chuyển state sang JSON ----------
+    def _on_kiosk_recognizing_started(self):
+        self.recognition_state = {
+            **self._idle_payload(), "state": "recognizing",
+            "title": "Đang xác thực quyền truy cập",
+            "message": "Đang đối chiếu khuôn mặt với hồ sơ đã đăng ký...",
+        }
+        self._publish()
+
+    def _show_multiple_faces_notice(self):
+        if self.is_recognizing or self._kiosk_waiting_for_departure:
+            return
+        self.recognition_state = {
+            **self._idle_payload(), "state": "validating",
+            "title": "Chưa xác định người gần nhất",
+            "message": "Người cần mở cửa vui lòng tiến gần camera hơn",
+        }
+        self._publish()
+
+    def _on_kiosk_face_quality_rejected(self, message):
+        if self.is_recognizing or self._kiosk_waiting_for_departure:
+            return
+        self._kiosk_unknown_attempts = 0
+        self.recognition_state = {
+            **self._idle_payload(), "state": "validating",
+            "title": "Căn chỉnh khuôn mặt", "message": message,
+        }
+        self._publish()
+
+    def _on_kiosk_unknown_confirmation_pending(self, attempt):
+        self.recognition_state = {
+            **self._idle_payload(), "state": "recognizing",
+            "title": "Đang xác minh lại",
+            "message": f"Lần kiểm tra {attempt}/2 · Cửa vẫn đóng, vui lòng giữ nguyên khuôn mặt",
+        }
+        self._publish()
+
+    def _on_kiosk_strict_confirmation_pending(self, votes, attempts, distance, margin):
+        self.recognition_state = {
+            **self._idle_payload(), "state": "strict_confirmation",
+            "title": "Đang kiểm tra quyền mở cửa",
+            "message": f"Đang gộp đặc trưng chống nhiễu JPEG · {votes}/2 frame",
+            "metrics": {"distance": distance, "margin": margin},
+        }
+        self._publish()
+
+    def _add_attendance_record(self, record):
+        with self._lock:
+            self.attendance_history.insert(0, record)
+            del self.attendance_history[100:]
+            self._attendance_history_version += 1
+            self._save_attendance_history()
+            self._event_version += 1
+
+    @staticmethod
+    def _door_event_time(event):
+        """Convert a controller timestamp to the same local format as face history."""
+        occurred_at = event.get("occurred_at")
+        try:
+            if isinstance(occurred_at, (int, float)) and occurred_at > 0:
+                return datetime.fromtimestamp(occurred_at).strftime("%H:%M:%S %d/%m/%Y")
+            received_at = str(event.get("received_at") or "").strip()
+            if received_at:
+                return datetime.fromisoformat(received_at).astimezone().strftime(
+                    "%H:%M:%S %d/%m/%Y"
+                )
+        except (OSError, OverflowError, ValueError):
+            pass
+        return datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+
+    def _on_door_event(self, event, show_access=True):
+        """Merge physical-door events into the common access history."""
+        event_id = str(event.get("event_id") or "").strip()
+        event_type = str(event.get("event") or "").strip()
+        if not event_id or event_type not in {
+            "fingerprint_granted", "fingerprint_denied", "button_open"
+        }:
+            return
+
+        with self._lock:
+            if any(row.get("door_event_id") == event_id for row in self.attendance_history):
+                return
+
+        common = {
+            "time": self._door_event_time(event),
+            "source": "fingerprint" if event_type.startswith("fingerprint_") else "button",
+            "door_event_id": event_id,
+        }
+        if event_type == "fingerprint_granted":
+            fingerprint_id = int(event.get("fingerprint_id") or 0)
+            registered = self.door_service.fingerprint(fingerprint_id)
+            if not isinstance(registered, dict):
+                registered = {}
+            employee = self._employee_for_fingerprint(registered, fingerprint_id)
+            record = {
+                **common,
+                "name": employee["name"],
+                "id": employee["id"] if employee["id"] != "—" else f"VT{fingerprint_id:03d}",
+                "role": employee["role"],
+                "dept": employee["department"],
+                "status": "Thành công",
+                "fingerprint_id": fingerprint_id,
+            }
+            access = {
+                "state": "success",
+                "title": "Xác thực thành công",
+                "message": "Đã nhận diện bằng cảm biến vân tay",
+                "employee": employee,
+                "timestamp": common["time"],
+                "method": "fingerprint",
+                "method_label": f"Vân tay · ID #{fingerprint_id}",
+                "access_state": "allowed",
+                "access_label": "Đã cho phép ra vào",
+                "metrics": None,
+            }
+        elif event_type == "fingerprint_denied":
+            record = {
+                **common,
+                "name": "Vân tay không xác định",
+                "id": "—",
+                "role": "Vân tay",
+                "dept": "Cửa chính",
+                "status": "Thất bại",
+                "reason": "Vân tay chưa đăng ký",
+            }
+            access = {
+                "state": "unknown",
+                "title": "Không thể xác thực",
+                "message": "Vân tay chưa được đăng ký trong hệ thống",
+                "employee": None,
+                "timestamp": common["time"],
+                "method": "fingerprint",
+                "method_label": "Vân tay",
+                "access_state": "denied",
+                "access_label": "Không được phép ra vào",
+                "metrics": None,
+            }
+        else:
+            record = {
+                **common,
+                "name": "Nút mở cửa bên trong",
+                "id": "—",
+                "role": "Thiết bị",
+                "dept": "Cửa chính",
+                "status": "Thành công",
+            }
+            access = None
+        if show_access and access is not None:
+            with self._lock:
+                self._fingerprint_access_state = access
+                self._fingerprint_access_until = time.monotonic() + 8.0
+        self._add_attendance_record(record)
+
+    def _sync_door_events_to_attendance_history(self):
+        """Backfill MQTT events saved before the unified history was introduced."""
+        events = self.door_service.events()
+        if not isinstance(events, list):
+            return
+        for event in reversed(events):
+            self._on_door_event(event, show_access=False)
+
+    def fingerprint_management(self):
+        return {
+            "items": self.door_service.fingerprints(),
+            "management": self.door_service.snapshot().get("fingerprint_management"),
+        }
+
+    def enroll_fingerprint(self, payload):
+        employee_id = self._clean_field(payload.get("employee_id", ""), compact=True)
+        name = self._clean_field(payload.get("name", ""))
+        role = self._clean_field(payload.get("role", ""))
+        department = self._clean_field(payload.get("department", ""))
+        if not all((employee_id, name, role, department)):
+            raise ValueError("Vui lòng nhập đầy đủ thông tin nhân viên")
+        selected_employee_id = self._clean_field(
+            payload.get("existing_employee_id", ""), compact=True,
+        )
+        matches = self.list_employees(query=employee_id, page=1, page_size=100)["items"]
+        existing = next(
+            (item for item in matches if item["id"].casefold() == employee_id.casefold()),
+            None,
+        )
+        if existing and not selected_employee_id:
+            raise ValueError("employee_id_exists_select_profile")
+        if selected_employee_id:
+            if not existing or existing["id"].casefold() != selected_employee_id.casefold():
+                raise ValueError("employee_profile_not_found")
+            employee_id = existing["id"]
+            name = existing["name"]
+            role = existing["role"]
+            department = existing["department"]
+        result = self.door_service.request_fingerprint_enroll(
+            payload.get("fingerprint_id"),
+            employee_id=employee_id,
+            name=name,
+            role=role,
+            department=department,
+        )
+        if not result.get("accepted"):
+            raise ValueError(result.get("reason", "fingerprint_enroll_rejected"))
+        return result
+
+    def delete_fingerprint(self, fingerprint_id):
+        result = self.door_service.request_fingerprint_delete(fingerprint_id)
+        if not result.get("accepted"):
+            raise ValueError(result.get("reason", "fingerprint_delete_rejected"))
+        return result
+
+    def update_fingerprint(self, fingerprint_id, payload):
+        return self.door_service.update_fingerprint_identity(
+            fingerprint_id,
+            payload.get("employee_id", ""),
+            payload.get("name", ""),
+            payload.get("role"),
+            payload.get("department"),
+        )
+
+    def _on_kiosk_recognition_success(self, emp_info, distance):
+        now = datetime.now()
+        now_display = now.strftime("%H:%M:%S · %d/%m/%Y")
+        now_value = now.strftime("%H:%M:%S %d/%m/%Y")
+        emp_id = emp_info.get("id", "NV---")
+        previous = self._attendance_cooldowns.get(emp_id)
+        duplicate = bool(
+            previous and time.time() - previous[0] < KIOSK_ATTENDANCE_COOLDOWN_SECONDS
+        )
+        employee = {
+            "id": emp_id,
+            "name": emp_info.get("name", "Nhân viên"),
+            "role": emp_info.get("role", "Nhân viên"),
+            "department": emp_info.get("department") or emp_info.get("dept") or "Phòng IT",
+            "image_url": self._employee_image_url(emp_id, emp_info),
+        }
+        door_decision = self.door_service.request_open(emp_id)
+        if not door_decision.get("accepted"):
+            print(
+                f"[DOOR] Khong gui OPEN cho {emp_id}: "
+                f"{door_decision.get('reason', 'unknown')}"
+            )
+        if not duplicate:
+            self._attendance_cooldowns[emp_id] = (time.time(), now_display)
+            self._add_attendance_record({
+                "time": now_value, "name": employee["name"], "id": emp_id,
+                "role": employee["role"], "dept": employee["department"],
+                "status": "Thành công",
+            })
+        self.recognition_state = {
+            "state": "duplicate" if duplicate else "success",
+            "title": "Đã xác thực gần đây" if duplicate else "Xác thực thành công",
+            "message": (
+                f"Lần gần nhất: {previous[1]}" if duplicate
+                else f"Thời gian xác thực: {now_display}"
+            ),
+            "employee": employee, "timestamp": now_display,
+            "metrics": {"distance": round(float(distance), 4)},
+        }
+        self._hold_result_and_suppress_active_face()
+        self.is_recognizing = False
+        self._is_kiosk_ui_idle = False
+        self._publish()
+
+    def _on_kiosk_recognition_ambiguous(self, best_distance, second_distance, margin):
+        now_value = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+        self._add_attendance_record({
+            "time": now_value, "name": "Chưa xác định", "id": "—",
+            "role": "—", "dept": "—", "status": "Thất bại",
+            "reason": "Không đủ độ tin cậy",
+            "distance": round(float(best_distance), 4),
+            "second_distance": round(float(second_distance), 4),
+            "margin": round(float(margin), 4),
+        })
+        self.recognition_state = {
+            **self._idle_payload(), "state": "ambiguous",
+            "title": "Không thể xác minh danh tính",
+            "message": "Không có hồ sơ nào đủ độ tin cậy",
+            "timestamp": now_value,
+            "metrics": {"distance": best_distance, "margin": margin},
+        }
+        self._hold_result_and_suppress_active_face()
+        self.is_recognizing = False
+        self._is_kiosk_ui_idle = False
+        self._publish()
+
+    def _on_kiosk_recognition_failed(self, distance):
+        now_value = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+        self._add_attendance_record({
+            "time": now_value, "name": "Người lạ / Khách", "id": "—",
+            "role": "Chưa đăng ký", "dept": "—", "status": "Thất bại",
+            "distance": round(float(distance), 4) if distance is not None else None,
+        })
+        self.recognition_state = {
+            **self._idle_payload(), "state": "unknown",
+            "title": "Chưa nhận diện được",
+            "message": "Khuôn mặt chưa có trong hệ thống",
+            "timestamp": now_value,
+        }
+        self._hold_result_and_suppress_active_face()
+        self.is_recognizing = False
+        self._is_kiosk_ui_idle = False
+        self._publish()
+
+    def set_idle_state(self):
+        self.is_recognizing = False
+        self._kiosk_waiting_for_departure = False
+        self._kiosk_idle_reset_pending = False
+        self._kiosk_active_face_area = None
+        self._kiosk_active_face_box = None
+        self._kiosk_face_stable_since = None
+        self._kiosk_unknown_attempts = 0
+        self._clear_strict_confirmation()
+        self.recognition_state = self._idle_payload()
+        self._is_kiosk_ui_idle = True
+        self._publish()
+
+    def retry_recognition(self):
+        self._kiosk_suppressed_face_tracks = []
+        self._kiosk_result_hold_until = 0.0
+        self.set_idle_state()
+        self._kiosk_face_stable_since = time.time()
+        return self.snapshot()
+
+    def test_recognition_image(self, image_bytes, suffix=".jpg", display_name="Ảnh kiểm thử"):
+        """Forward a temporary upload to the existing static-image AI worker."""
+        if not image_bytes:
+            raise ValueError("Tệp ảnh trống")
+        if len(image_bytes) > 12 * 1024 * 1024:
+            raise ValueError("Ảnh kiểm thử không được lớn hơn 12 MB")
+        allowed = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+        suffix = suffix.lower() if suffix.lower() in allowed else ".jpg"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as file:
+            file.write(image_bytes)
+            temporary_path = Path(file.name)
+        version = int(self.recognition_test_result.get("version", 0)) + 1
+        self.recognition_test_result = {
+            "version": version, "state": "processing", "result": None,
+            "error": None, "display_name": display_name,
+        }
+        self._publish()
+
+        def run_existing_worker():
+            try:
+                self._worker_recognition_test_image(str(temporary_path))
+            finally:
+                temporary_path.unlink(missing_ok=True)
+
+        threading.Thread(target=run_existing_worker, daemon=True).start()
+        return self.snapshot()
+
+    def _show_recognition_test_result(self, result, error):
+        version = int(self.recognition_test_result.get("version", 0))
+        safe_result = None
+        if result:
+            best = result.get("best_profile") or {}
+            second = result.get("second_profile") or {}
+            second_distance = result.get("second_distance")
+            safe_result = {
+                "file": self.recognition_test_result.get("display_name") or result.get("file"),
+                "conclusion": result.get("conclusion"),
+                "best": {"id": best.get("id"), "name": best.get("name")},
+                "best_distance": round(float(result.get("best_distance", 0)), 4),
+                "second": {"id": second.get("id"), "name": second.get("name")},
+                "second_distance": (
+                    round(float(second_distance), 4)
+                    if second_distance is not None and second_distance != float("inf")
+                    else None
+                ),
+                "margin": round(float(result.get("margin", 0)), 4),
+            }
+        self.recognition_test_result = {
+            "version": version,
+            "state": "error" if error else "complete",
+            "result": safe_result,
+            "error": error,
+        }
+        self._publish()
+
+    # ---------- Enrollment adapter: worker trích vector vẫn là worker gốc ----------
+    def _fingerprint_identity_for_employee(self, emp_id):
+        """Return the canonical fingerprint-only profile for an employee ID."""
+        normalized_id = str(emp_id or "").strip().casefold()
+        if not normalized_id:
+            return None
+        for fingerprint in self.door_service.fingerprints():
+            linked_id = str(fingerprint.get("employee_id") or "").strip()
+            if linked_id.casefold() == normalized_id:
+                return fingerprint
+        return None
+
+    def save_enrollment(self, payload):
+        if self._enrollment_saving:
+            raise ValueError("Hệ thống đang lưu một hồ sơ khác")
+        name = str(payload.get("name", "")).strip()
+        emp_id = str(payload.get("id", "")).strip()
+        role = str(payload.get("role", "")).strip()
+        department = str(payload.get("department", "")).strip()
+        if not all((name, emp_id, role, department)):
+            raise ValueError("Vui lòng nhập đầy đủ thông tin nhân viên")
+        if re.search(r'[\s<>:"/\\|?*@]', emp_id):
+            raise ValueError("Mã nhân viên không được có khoảng trắng hoặc ký tự đặc biệt")
+        duplicate = self._find_existing_employee_id(emp_id)
+        if duplicate:
+            raise ValueError(f"Mã nhân viên {duplicate} đã tồn tại")
+        fingerprint_identity = self._fingerprint_identity_for_employee(emp_id)
+        if fingerprint_identity:
+            canonical = {
+                "name": str(fingerprint_identity.get("name") or "").strip(),
+                "role": str(fingerprint_identity.get("role") or "").strip(),
+                "department": str(fingerprint_identity.get("department") or "").strip(),
+            }
+            submitted = {"name": name, "role": role, "department": department}
+            conflicts = [
+                field for field, value in canonical.items()
+                if value and value.casefold() != submitted[field].casefold()
+            ]
+            if conflicts:
+                stored_name = canonical["name"] or emp_id
+                raise ValueError(
+                    f"Mã nhân viên {emp_id} đã thuộc hồ sơ {stored_name}. "
+                    "Hãy sử dụng thông tin đã lưu hoặc sửa hồ sơ tại tab Nhân viên."
+                )
+            name = canonical["name"] or name
+            role = canonical["role"] or role
+            department = canonical["department"] or department
+        if not self.camera_running:
+            raise ValueError("Camera chưa sẵn sàng")
+        if not self.enrollment_capture_ready:
+            raise ValueError("Hãy giữ khuôn mặt hợp lệ trong 3 giây trước khi lưu")
+        samples = [sample.copy() for sample in self.enrollment_captured_samples[-ENROLLMENT_EMBEDDING_SAMPLES:]]
+        if len(samples) < ENROLLMENT_MIN_SAMPLES:
+            raise ValueError("Dữ liệu quét khuôn mặt chưa đầy đủ")
+        frame = self.enrollment_captured_frame
+        if frame is None:
+            raise ValueError("Không tìm thấy ảnh khuôn mặt đã quét")
+        self._enrollment_saving = True
+        self.enrollment_result = {
+            "state": "saving", "title": "Đang lưu khuôn mặt",
+            "message": "Đang trích xuất vector ArcFace...",
+        }
+        self._publish()
+        threading.Thread(
+            target=self._ai_worker_save_face,
+            args=(samples, frame.copy(), name, emp_id, role, department),
+            daemon=True,
+        ).start()
+        return self.snapshot()
+
+    def _finish_enrollment(self, success, name="", emp_id="", error_msg=""):
+        self._enrollment_saving = False
+        if success:
+            profile = (self.embeddings_cache or {}).get(emp_id, {})
+            for fingerprint in self.door_service.fingerprints():
+                if str(fingerprint.get("employee_id") or "").strip().casefold() == emp_id.casefold():
+                    self.door_service.update_fingerprint_identity(
+                        int(fingerprint["fingerprint_id"]), emp_id,
+                        profile.get("name") or name,
+                        profile.get("role"), profile.get("department"),
+                    )
+            self._enrollment_scan_armed = False
+            self._reset_enrollment_scan(clear_preview=False, wait_for_face_leave=True)
+            self.enrollment_result = {
+                "state": "success", "title": "Lưu khuôn mặt thành công",
+                "message": f"{name} ({emp_id}) đã được thêm vào hệ thống.",
+            }
+            self._start_continuous_enrollment_session()
+        else:
+            self.enrollment_result = {
+                "state": "error", "title": "Không thể lưu khuôn mặt",
+                "message": error_msg or "Vui lòng thử lại.",
+            }
+        self._publish()
+
+    def _cancel_enrollment_idle_timer(self):
+        with self._lock:
+            timer = self._enrollment_idle_timer
+            self._enrollment_idle_timer = None
+            self._enrollment_idle_deadline = None
+        if timer is not None:
+            timer.cancel()
+
+    def _start_continuous_enrollment_session(self):
+        """Giữ kiosk trong phiên đăng ký và chờ thao tác quản trị tiếp theo."""
+        with self._lock:
+            self._enrollment_continuous_session = True
+        self._restart_enrollment_idle_timer()
+
+    def _stop_continuous_enrollment_session(self):
+        self._cancel_enrollment_idle_timer()
+        with self._lock:
+            self._enrollment_continuous_session = False
+            self._enrollment_scan_armed = False
+
+
+    def _restart_enrollment_idle_timer(self):
+        """Khởi động lại timeout khi có thao tác đăng ký có ý nghĩa."""
+        self._cancel_enrollment_idle_timer()
+        with self._lock:
+            should_start = bool(
+                self._enrollment_continuous_session
+                and self.current_page == "add_employee"
+                and not self._enrollment_saving
+                and not self.enrollment_capture_ready
+                and self._enrollment_idle_timer is None
+            )
+            if not should_start:
+                return
+            timer = threading.Timer(
+                ENROLLMENT_SESSION_IDLE_TIMEOUT_SECONDS,
+                self._auto_return_to_attendance,
+            )
+            timer.daemon = True
+            self._enrollment_idle_timer = timer
+            self._enrollment_idle_deadline = (
+                time.monotonic() + ENROLLMENT_SESSION_IDLE_TIMEOUT_SECONDS
+            )
+        timer.start()
+
+    def note_enrollment_activity(self):
+        """Ghi nhận lúc quản trị viên nhập hồ sơ tiếp theo."""
+        self._restart_enrollment_idle_timer()
+        self._publish()
+        return self.snapshot()
+
+    def start_enrollment_scan(self):
+        """Cho phép camera thu mẫu sau lệnh chủ động của quản trị viên."""
+        if self._enrollment_saving:
+            raise ValueError("Hệ thống đang lưu khuôn mặt")
+        if self.current_page != "add_employee":
+            self.switch_mode("add_employee")
+        self._restart_enrollment_idle_timer()
+        self._enrollment_scan_armed = True
+        wait_for_face_leave = bool(self._enrollment_waiting_for_face_leave)
+        self._reset_enrollment_scan(
+            clear_preview=False,
+            wait_for_face_leave=wait_for_face_leave,
+        )
+        self.enrollment_result = {
+            "state": "idle",
+            "title": "Chờ khuôn mặt hợp lệ",
+            "message": "Giữ yên khuôn mặt trong 3 giây để hệ thống tự động quét.",
+        }
+        self._publish()
+        return self.snapshot()
+
+    def cancel_enrollment_scan(self):
+        """Hủy lượt quét hiện tại nhưng giữ kiosk và biểu mẫu đăng ký mở."""
+        if self._enrollment_saving:
+            raise ValueError("Không thể hủy khi hệ thống đang lưu khuôn mặt")
+        had_captured_face = bool(self.enrollment_capture_ready)
+        self._enrollment_scan_armed = False
+        self._reset_enrollment_scan(
+            clear_preview=False,
+            wait_for_face_leave=had_captured_face,
+        )
+        self.enrollment_result = {
+            "state": "idle",
+            "title": "Đã hủy quét khuôn mặt",
+            "message": "Thông tin nhân viên vẫn được giữ. Nhấn bắt đầu quét khi bạn sẵn sàng.",
+        }
+        if self._enrollment_continuous_session:
+            self._restart_enrollment_idle_timer()
+        self._publish()
+        return self.snapshot()
+
+    def finish_enrollment_session(self):
+        """Kết thúc phiên hàng loạt và đưa kiosk về điểm danh."""
+        if self._enrollment_saving:
+            raise ValueError("Hãy chờ lưu khuôn mặt xong trước khi kết thúc phiên")
+        return self.switch_mode("attendance")
+
+    def _auto_return_to_attendance(self):
+        with self._lock:
+            self._enrollment_idle_timer = None
+            self._enrollment_idle_deadline = None
+            should_return = bool(
+                self._enrollment_continuous_session
+                and self.current_page == "add_employee"
+                and not self._enrollment_saving
+                and not self.enrollment_capture_ready
+            )
+        if should_return:
+            print(
+                "[ENROLLMENT] Không có thao tác đăng ký trong "
+                f"{ENROLLMENT_SESSION_IDLE_TIMEOUT_SECONDS:.0f} giây; "
+                "tự động trở về điểm danh."
+            )
+            self.switch_mode("attendance")
+
+    def _on_enrollment_face_left(self):
+        """Mở lượt đăng ký mới sau khi người của lượt trước rời camera."""
+        if self.enrollment_result.get("state") != "success":
+            return
+        self.enrollment_result = {
+            "state": "idle",
+            "title": "Chờ khuôn mặt hợp lệ",
+            "message": "Giữ yên khuôn mặt trong 3 giây để hệ thống tự động quét.",
+        }
+        self._publish()
+
+    def reset_enrollment(self):
+        if self._enrollment_saving:
+            raise ValueError("Không thể hủy khi hệ thống đang lưu khuôn mặt")
+        had_captured_face = bool(self.enrollment_capture_ready)
+        self._reset_enrollment_scan(
+            clear_preview=False,
+            wait_for_face_leave=had_captured_face,
+        )
+        self.enrollment_result = {
+            "state": "idle", "title": "Chờ khuôn mặt hợp lệ",
+            "message": (
+                "Đã hủy ảnh quét. Vui lòng rời khỏi khung trước khi quét lại."
+                if had_captured_face else
+                "Giữ yên khuôn mặt trong 3 giây để hệ thống tự động quét."
+            ),
+        }
+        if self._enrollment_continuous_session:
+            self._restart_enrollment_idle_timer()
+        self._publish()
+        return self.snapshot()
+
+    # ---------- Dữ liệu quản trị ----------
+    def _read_profiles(self):
+        path = Path("data/embeddings.pkl")
+        if not path.exists():
+            return {}
+        with path.open("rb") as file:
+            profiles = pickle.load(file)
+        # Phòng thủ nhiều lớp: dữ liệu benchmark chỉ dùng đánh giá offline,
+        # kể cả file cũ có cờ bật cũng không được xuất hiện là gallery thật.
+        for profile in profiles.values():
+            if profile.get("source") == "LFW benchmark":
+                profile["recognition_enabled"] = False
+        return profiles
+
+    def _write_profiles(self, profiles):
+        path = Path("data/embeddings.pkl")
+        temporary = path.with_suffix(".pkl.tmp")
+        with temporary.open("wb") as file:
+            pickle.dump(profiles, file)
+        temporary.replace(path)
+        self.embeddings_cache = profiles
+
+    def _profile_image(self, emp_id, profile=None):
+        candidates = []
+        if profile and profile.get("image_path"):
+            candidates.append(Path(profile["image_path"]))
+        for folder in (Path(DATA_FACES_DIR),):
+            candidates.extend(folder.glob(f"{emp_id}@*"))
+            candidates.extend(folder.glob(f"{emp_id}_*"))
+        return next((path for path in candidates if path.exists()), None)
+
+    def _employee_image_url(self, emp_id, profile=None):
+        """Gắn phiên bản tệp vào URL để trình duyệt không giữ ảnh hồ sơ cũ."""
+        image = self._profile_image(emp_id, profile)
+        try:
+            version = image.stat().st_mtime_ns if image is not None else 0
+        except OSError:
+            version = 0
+        return f"/api/employees/{emp_id}/image?v={version}"
+
+    def list_employees(self, query="", page=1, page_size=10):
+        profiles = self.embeddings_cache
+        if profiles is None:
+            profiles = self._read_profiles()
+            self.embeddings_cache = profiles
+        fingerprints = self.door_service.fingerprints()
+        fingerprint_groups = {}
+        for item in fingerprints:
+            fingerprint_id = int(item.get("fingerprint_id") or 0)
+            employee_id = str(item.get("employee_id") or "").strip()
+            group_key = employee_id.casefold() if employee_id else f"vt{fingerprint_id:03d}"
+            group = fingerprint_groups.setdefault(group_key, {
+                "employee_id": employee_id,
+                "name": str(item.get("name") or f"Vân tay #{fingerprint_id}"),
+                "role": str(item.get("role") or "Nhân viên"),
+                "department": str(item.get("department") or "—"),
+                "ids": [],
+            })
+            group["ids"].append(fingerprint_id)
+
+        records = []
+        for key, profile in profiles.items():
+            if profile.get("source") == "LFW benchmark":
+                continue
+            emp_id = str(profile.get("id") or key)
+            name = str(profile.get("name") or "Nhân viên")
+            fingerprint_group = fingerprint_groups.pop(emp_id.casefold(), None)
+            fingerprint_ids = sorted(fingerprint_group["ids"]) if fingerprint_group else []
+            face_enabled = bool(profile.get("recognition_enabled", True))
+            records.append({
+                "id": emp_id, "name": name,
+                "role": profile.get("role") or "Nhân viên",
+                "department": profile.get("department") or profile.get("dept") or "Phòng IT",
+                "recognition_enabled": face_enabled,
+                "face_registered": True,
+                "fingerprint_registered": bool(fingerprint_ids),
+                "fingerprint_ids": fingerprint_ids,
+                "access_enabled": face_enabled or bool(fingerprint_ids),
+                "image_url": self._employee_image_url(emp_id, profile),
+                "timestamp": profile.get("timestamp"),
+            })
+
+        # ID chỉ có vân tay vẫn là một hồ sơ ra vào hợp lệ. Nếu chưa được gắn
+        # mã nhân viên, dùng mã VTxxx để người quản trị có thể nhận biết và sửa.
+        for group in fingerprint_groups.values():
+            fingerprint_ids = sorted(group["ids"])
+            emp_id = group["employee_id"] or f"VT{fingerprint_ids[0]:03d}"
+            records.append({
+                "id": emp_id,
+                "name": group["name"],
+                "role": group["role"],
+                "department": group["department"],
+                "recognition_enabled": False,
+                "face_registered": False,
+                "fingerprint_registered": True,
+                "fingerprint_ids": fingerprint_ids,
+                "access_enabled": True,
+                "image_url": None,
+                "timestamp": None,
+            })
+
+        all_total = len(records)
+        enabled_total = sum(bool(item["access_enabled"]) for item in records)
+        face_total = sum(bool(item["face_registered"]) for item in records)
+        fingerprint_total = sum(bool(item["fingerprint_registered"]) for item in records)
+        both_total = sum(
+            bool(item["face_registered"] and item["fingerprint_registered"])
+            for item in records
+        )
+        query = query.strip().casefold()
+        if query:
+            records = [
+                item for item in records
+                if query in item["id"].casefold() or query in item["name"].casefold()
+            ]
+        def alphabetical_key(value):
+            normalized = unicodedata.normalize("NFKD", str(value).casefold())
+            normalized = normalized.replace("đ", "d")
+            return "".join(
+                char for char in normalized if not unicodedata.combining(char)
+            )
+
+        # Ưu tiên hồ sơ đang nhận diện; trong từng nhóm sắp tên A-Z.
+        records.sort(key=lambda item: (
+            not item["access_enabled"],
+            alphabetical_key(item["name"]),
+            alphabetical_key(item["id"]),
+        ))
+        total = len(records)
+        page_size = max(1, min(int(page_size), 100))
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = max(1, min(int(page), pages))
+        start = (page - 1) * page_size
+        return {
+            "items": records[start:start + page_size],
+            "total": total,
+            "all_total": all_total,
+            "enabled_total": enabled_total,
+            "face_total": face_total,
+            "fingerprint_total": fingerprint_total,
+            "both_total": both_total,
+            "page": page,
+            "page_size": page_size,
+            "pages": pages,
+        }
+
+    def employee_image(self, emp_id):
+        profiles = self._read_profiles()
+        key = next((k for k in profiles if str(k).casefold() == emp_id.casefold()), None)
+        return self._profile_image(emp_id, profiles.get(key) if key is not None else None)
+
+    @staticmethod
+    def _clean_field(value, compact=False):
+        value = re.sub(r'[<>:"/\\|?*@]', "", str(value).strip())
+        value = re.sub(r"\s+", " ", value)
+        return value.replace(" ", "") if compact else value
+
+    def update_employee(self, emp_id, payload):
+        new_id = self._clean_field(payload.get("id", emp_id), compact=True)
+        name = self._clean_field(payload.get("name", ""))
+        role = self._clean_field(payload.get("role", ""))
+        department = self._clean_field(payload.get("department", ""))
+        if not all((new_id, name, role, department)):
+            raise ValueError("Vui lòng nhập đầy đủ thông tin")
+
+        fingerprints = self.door_service.fingerprints()
+        linked_fingerprints = []
+        for fingerprint in fingerprints:
+            linked_id = str(fingerprint.get("employee_id") or "").strip()
+            if not linked_id:
+                linked_id = f"VT{int(fingerprint['fingerprint_id']):03d}"
+            if linked_id.casefold() == emp_id.casefold():
+                linked_fingerprints.append(fingerprint)
+
+        with self._lock:
+            profiles = self._read_profiles()
+            key = next((k for k in profiles if str(k).casefold() == emp_id.casefold()), None)
+            if key is None and not linked_fingerprints:
+                raise KeyError("Không tìm thấy nhân viên")
+            duplicate = next((k for k in profiles if str(k).casefold() == new_id.casefold() and k != key), None)
+            duplicate_fingerprint = next((item for item in fingerprints
+                if str(item.get("employee_id") or "").strip().casefold() == new_id.casefold()
+                and item not in linked_fingerprints), None)
+            if duplicate is not None or duplicate_fingerprint is not None:
+                raise ValueError(f"Mã nhân viên {new_id} đã tồn tại")
+            if key is not None:
+                profile = dict(profiles.pop(key))
+                timestamp = profile.get("timestamp") or datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"{new_id}@{role.replace(' ', '_')}@{department.replace(' ', '_')}@{name.replace(' ', '_')}_{timestamp}.jpg"
+                renames = []
+                if new_id != emp_id or any(profile.get(k) != v for k, v in (("name", name), ("role", role), ("department", department))):
+                    source = next(iter(Path(DATA_FACES_DIR).glob(f"{emp_id}@*")), None)
+                    if source and source.exists():
+                        target = Path(DATA_FACES_DIR) / filename
+                        if target != source:
+                            if target.exists():
+                                raise ValueError(f"Tệp khuôn mặt đích đã tồn tại: {target.name}")
+                            renames.append((source, target))
+                completed = []
+                try:
+                    for source, target in renames:
+                        source.rename(target)
+                        completed.append((source, target))
+                except Exception:
+                    for source, target in reversed(completed):
+                        if target.exists() and not source.exists():
+                            target.rename(source)
+                    raise
+                profile.update({"id": new_id, "name": name, "role": role, "department": department, "image_path": str(Path(DATA_FACES_DIR) / filename)})
+                profiles[new_id] = profile
+                self._write_profiles(profiles)
+
+        for fingerprint in linked_fingerprints:
+            self.door_service.update_fingerprint_identity(
+                int(fingerprint["fingerprint_id"]), new_id, name, role, department
+            )
+        self._publish()
+        return self.list_employees(query=new_id, page=1, page_size=1)["items"][0]
+
+    def toggle_employee(self, emp_id):
+        with self._lock:
+            profiles = self._read_profiles()
+            key = next((k for k in profiles if str(k).casefold() == emp_id.casefold()), None)
+            if key is None:
+                raise KeyError("Không tìm thấy nhân viên")
+            if profiles[key].get("source") == "LFW benchmark":
+                raise ValueError("Hồ sơ benchmark không được bật nhận diện thực tế")
+            profiles[key]["recognition_enabled"] = not bool(profiles[key].get("recognition_enabled", True))
+            self._write_profiles(profiles)
+            value = profiles[key]["recognition_enabled"]
+        self._publish()
+        return {"id": emp_id, "recognition_enabled": value}
+
+    def delete_employee(self, emp_id):
+        with self._lock:
+            profiles = self._read_profiles()
+            key = next((k for k in profiles if str(k).casefold() == emp_id.casefold()), None)
+            if key is None:
+                raise KeyError("Không tìm thấy nhân viên")
+            profiles.pop(key)
+            for folder in (Path(DATA_FACES_DIR),):
+                for image in list(folder.glob(f"{emp_id}@*")) + list(folder.glob(f"{emp_id}_*")):
+                    image.unlink(missing_ok=True)
+            self._write_profiles(profiles)
+        self._publish()
+
+    def history_page(self, page=1, page_size=10, status="", query=""):
+        rows = list(self.attendance_history)
+        if status:
+            rows = [row for row in rows if status.casefold() in str(row.get("status", "")).casefold()]
+        if query:
+            needle = query.casefold()
+            rows = [row for row in rows if needle in str(row.get("name", "")).casefold() or needle in str(row.get("id", "")).casefold()]
+        total = len(rows)
+        page_size = max(1, min(int(page_size), 100))
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = max(1, min(int(page), pages))
+        start = (page - 1) * page_size
+        return {"items": rows[start:start + page_size], "total": total, "page": page, "page_size": page_size, "pages": pages}
+
+    def dashboard(self):
+        today = datetime.now().strftime("%d/%m/%Y")
+        today_rows = [row for row in self.attendance_history if today in str(row.get("time", ""))]
+        success = sum("Thành công" in str(row.get("status", "")) for row in today_rows)
+        failed = len(today_rows) - success
+        profiles = self.embeddings_cache
+        if profiles is None:
+            profiles = self._read_profiles()
+            self.embeddings_cache = profiles
+        start = datetime.now().date() - timedelta(days=datetime.now().weekday())
+        week = []
+        names = ["Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7", "Chủ nhật"]
+        for offset, label in enumerate(names):
+            date = start + timedelta(days=offset)
+            token = date.strftime("%d/%m/%Y")
+            count = sum(token in str(row.get("time", "")) and "Thành công" in str(row.get("status", "")) for row in self.attendance_history)
+            week.append({"label": label, "date": date.strftime("%d/%m"), "value": count})
+        return {
+            "employees": self.list_employees(page=1, page_size=1)["all_total"], "today_total": len(today_rows),
+            "today_success": success, "today_failed": failed,
+            "success_rate": round(success / len(today_rows) * 100) if today_rows else 0,
+            "week": week, "recent": self.attendance_history[:5],
+        }

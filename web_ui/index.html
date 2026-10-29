@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FaceCheck - Hệ thống quản lý ra vào tích hợp nhận diện khuôn mặt và cảm biến vân tay</title>
+  <link rel="stylesheet" href="/css/variables.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <link rel="stylesheet" href="/css/components.css">
+  <link rel="stylesheet" href="/css/pages.css">
+  <link rel="stylesheet" href="/css/kiosk.css">
+  <link rel="stylesheet" href="/css/animations.css">
+</head>
+<body>
+  <svg class="svg-sprite" aria-hidden="true">
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.6 3.1 7.8 7.5 9.5 4.4-1.7 7.5-4.9 7.5-9.5V6L12 3Z"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 11 9-8 9 8v9H6v-9"/><path d="M9 20v-6h6v6"/></symbol>
+    <symbol id="i-user-scan" viewBox="0 0 24 24"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/><circle cx="12" cy="10" r="3"/><path d="M7.5 18c.7-2.5 2.2-4 4.5-4s3.8 1.5 4.5 4"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c.4-4 2.4-6 6-6s5.6 2 6 6"/><path d="M16 5a3 3 0 0 1 0 6M16 14c3 0 4.6 2 5 5"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 10h18"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 7h4l2-2h4l2 2h4v12H4V7Z"/><circle cx="12" cy="13" r="4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19L12 3Z"/><path d="M12 9v5M12 17h.01"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m4 16-1 5 5-1L19 9l-4-4L4 16Z"/><path d="m13.5 6.5 4 4"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m4 18 5-5 3 3 2-2 6 6"/></symbol>
+    <symbol id="i-briefcase" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V4h6v3M3 12h18"/></symbol>
+    <symbol id="i-building" viewBox="0 0 24 24"><path d="M4 21V5h10v16M14 10h6v11M8 9h2M8 13h2M8 17h2M17 14h1M17 17h1"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+    <symbol id="i-bars" viewBox="0 0 24 24"><path d="M5 20V10M10 20V4M15 20v-7M20 20V7"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M14 7l5 5-5 5"/></symbol>
+    <symbol id="i-user-add" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c.4-4 2.4-6 6-6s5.6 2 6 6M18 8v6M15 11h6"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 3h12l3 3v15H4V4l1-1Z"/><path d="M8 3v6h8V3M8 21v-7h8v7"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-fingerprint" viewBox="0 0 24 24"><path d="M12 3a8 8 0 0 0-8 8M20 11a8 8 0 0 0-8-8M7 11a5 5 0 0 1 10 0c0 5-1 8-3 10M10 21c2-3 2-6 2-10M4 15c0 2-.3 4-1 6M7 15c0 3-.5 5-1.5 7M20 15c0 2 .3 4 1 6"/></symbol>
+  </svg>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark"><svg><use href="#i-shield"/></svg></span><span><strong>FaceCheck</strong><small>Quản lý ra vào · Khuôn mặt &amp; vân tay</small></span></div>
+      <nav class="nav" aria-label="Điều hướng chính">
+        <button data-route="dashboard"><svg><use href="#i-home"/></svg><span>Tổng quan</span></button>
+        <button data-route="enrollment"><svg><use href="#i-user-scan"/></svg><span>Đăng ký khuôn mặt</span></button>
+        <button data-route="recognition" class="active"><svg><use href="#i-target"/></svg><span>Giám sát cửa</span></button>
+        <button data-route="employees"><svg><use href="#i-users"/></svg><span>Nhân viên</span></button>
+        <button data-route="fingerprints"><svg><use href="#i-fingerprint"/></svg><span>Đăng ký vân tay</span></button>
+        <button data-route="history"><svg><use href="#i-list"/></svg><span>Nhật ký xác thực</span></button>
+      </nav>
+      <div class="system-card">
+        <div class="system-heading"><span class="system-icon"><svg><use href="#i-shield"/></svg></span><span><strong>Trạng thái vận hành</strong><small id="sideConnection">Đang kiểm tra kết nối...</small></span></div>
+        <dl><div><dt>Camera</dt><dd><i></i><span id="sideCamera">Đang kiểm tra...</span></dd></div><div><dt>Nhận diện khuôn mặt</dt><dd><i></i><span id="sideDevice">Đang kiểm tra...</span></dd></div><div><dt>Bộ điều khiển cửa</dt><dd><i></i><span id="sideDoor">Đang kiểm tra...</span></dd></div></dl>
+      </div>
+      <span class="version">v1.0.0</span>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="page-heading"><span class="page-icon"><svg><use href="#i-target"/></svg></span><span><h1 id="pageTitle">Giám sát cửa</h1><p id="pageSubtitle">Theo dõi xác thực, thiết bị và yêu cầu mở khóa theo thời gian thực</p></span></div>
+        <div class="top-actions"><button class="primary" data-route="enrollment">+ Đăng ký mới</button><span class="date"><svg><use href="#i-calendar"/></svg><span id="currentDate"></span></span><span class="clock"><svg><use href="#i-clock"/></svg><b id="currentTime"></b></span></div>
+      </header>
+      <div class="connection-bar" id="connectionBar"></div>
+
+      <section class="page" data-page="dashboard">
+        <div class="dashboard-metrics" id="dashboardStats"></div>
+        <div class="dashboard-main-grid">
+          <article class="card dashboard-chart-card">
+            <div class="dashboard-section-head"><span class="section-icon"><svg><use href="#i-bars"/></svg></span><div><h2>Biểu đồ lượt ra vào 7 ngày</h2><p>Thống kê số lượt xác thực gần đây trong tuần</p></div><span class="period-chip"><svg><use href="#i-calendar"/></svg> 7 ngày qua</span></div>
+            <div class="dashboard-chart" id="weekChart"></div>
+          </article>
+          <article class="card dashboard-activity-card">
+            <div class="dashboard-section-head"><span class="section-icon"><svg><use href="#i-clock"/></svg></span><div><h2>Hoạt động gần đây</h2><p>5 bản ghi mới nhất trong hệ thống</p></div><button class="soft-link" data-route="history">Xem lịch sử <svg><use href="#i-arrow"/></svg></button></div>
+            <div id="dashboardRecent" class="dashboard-timeline"></div>
+          </article>
+        </div>
+        <div class="dashboard-bottom-grid">
+          <article class="card quick-card">
+            <div class="dashboard-section-head"><span class="section-icon"><svg><use href="#i-list"/></svg></span><div><h2>Lối tắt thao tác nhanh</h2><p>Truy cập các chức năng chính của hệ thống</p></div></div>
+            <div class="quick-actions">
+              <button class="quick-action primary-action" data-route="recognition"><span class="quick-icon"><svg><use href="#i-target"/></svg></span><span><strong>Giám sát cửa</strong><small>Theo dõi xác thực trực tiếp</small></span><svg class="quick-arrow"><use href="#i-arrow"/></svg></button>
+              <button class="quick-action success-action" data-route="enrollment"><span class="quick-icon"><svg><use href="#i-user-add"/></svg></span><span><strong>Đăng ký khuôn mặt</strong><small>Thêm hồ sơ nhân viên</small></span><svg class="quick-arrow"><use href="#i-arrow"/></svg></button>
+              <button class="quick-action" data-route="employees"><span class="quick-icon"><svg><use href="#i-users"/></svg></span><span><strong>Quản lý nhân viên</strong><small>Xem và chỉnh sửa hồ sơ</small></span><svg class="quick-arrow"><use href="#i-arrow"/></svg></button>
+              <button class="quick-action" data-route="history"><span class="quick-icon"><svg><use href="#i-list"/></svg></span><span><strong>Xem lịch sử</strong><small>Tra cứu ra vào</small></span><svg class="quick-arrow"><use href="#i-arrow"/></svg></button>
+            </div>
+          </article>
+          <article class="card success-card">
+            <div class="dashboard-section-head"><span class="section-icon"><svg><use href="#i-target"/></svg></span><div><h2>Tỷ lệ xác thực thành công</h2><p>Thống kê kết quả cấp quyền mở cửa trong ngày</p></div></div>
+            <div id="successOverview" class="success-overview"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="page" data-page="enrollment">
+        <div class="enrollment-grid">
+          <article class="card enrollment-form">
+            <div class="enrollment-steps" id="enrollmentSteps" aria-label="Tiến trình đăng ký">
+              <button class="step active" type="button" data-step="1" aria-current="step"><span>1</span><b>1. Thông tin</b></button><i></i>
+              <button class="step" type="button" data-step="2" aria-disabled="true"><span>2</span><b>2. Quét khuôn mặt</b></button><i></i>
+              <button class="step" type="button" data-step="3" aria-disabled="true"><span>3</span><b>3. Hoàn tất</b></button>
+            </div>
+            <div class="enrollment-form-body">
+              <div class="enrollment-session" id="enrollmentSession" hidden>
+                <span><i></i><strong>Phiên đăng ký đang mở</strong><small id="enrollmentSessionStatus">Tự động kết thúc sau <b id="enrollmentIdleCountdown">15</b> giây</small></span>
+                <button id="finishEnrollmentSession" type="button">Kết thúc phiên</button>
+              </div>
+              <div class="form-intro"><h2>Thông tin nhân viên</h2><p>Thông tin hồ sơ được dùng chung cho khuôn mặt, vân tay và lịch sử ra vào.</p></div>
+              <form id="enrollmentForm">
+                <label class="existing-profile-selector">Chọn hồ sơ đã có<select name="existing_employee_id" id="faceEmployeeSelect"><option value="">Nhân viên mới — nhập thông tin bên dưới</option></select></label>
+                <label>Họ và tên nhân viên<span class="field-control"><svg><use href="#i-users"/></svg><input name="name" placeholder="Nguyễn Văn A" autocomplete="name" required></span></label>
+                <label>Mã nhân viên<span class="field-control"><svg><use href="#i-list"/></svg><input name="id" placeholder="NV001" autocomplete="off" required></span></label>
+                <label>Chức vụ<span class="field-control"><svg><use href="#i-briefcase"/></svg><input name="role" placeholder="Kỹ sư phần mềm" required></span></label>
+                <label>Phòng ban<span class="field-control"><svg><use href="#i-building"/></svg><input name="department" placeholder="Phòng IT" required></span></label>
+                <button class="primary wide enrollment-start" id="startEnrollmentScan" type="button" disabled><svg><use href="#i-user-scan"/></svg><span>Bắt đầu quét tại kiosk</span></button>
+                <button class="secondary wide enrollment-cancel-scan" id="cancelEnrollmentScan" type="button" hidden><svg><use href="#i-x"/></svg><span>Hủy quét khuôn mặt</span></button>
+                <button class="primary wide enrollment-save" id="saveEnrollment" disabled><svg><use href="#i-save"/></svg><span>Lưu khuôn mặt</span></button>
+              </form>
+              <aside class="scan-notes">
+                <div class="scan-notes-title"><span><svg><use href="#i-info"/></svg></span><strong>Lưu ý khi quét</strong></div>
+                <ol>
+                  <li><span>1</span>Chỉ để một khuôn mặt trong khung quét</li>
+                  <li><span>2</span>Nhìn thẳng, không che mắt, mũi hoặc miệng</li>
+                  <li><span>3</span>Giữ yên 3 giây để hệ thống tự chụp đủ mẫu</li>
+                </ol>
+                <p id="enrollmentNotice">Hệ thống sẽ kiểm tra vị trí, kích thước và góc khuôn mặt trước khi cho phép lưu.</p>
+              </aside>
+            </div>
+          </article>
+          <article class="card camera-card enrollment-camera-card" tabindex="-1">
+            <div class="camera-card-head"><strong><svg><use href="#i-camera"/></svg><span id="enrollmentCameraHeading">Camera trực tiếp</span></strong><button class="camera-expand" type="button" aria-label="Phóng to camera"><svg><use href="#i-expand"/></svg></button></div>
+            <div class="camera-slot" data-camera-slot="enrollment"></div>
+            <div class="quality-grid" aria-label="Chất lượng quét">
+              <div class="quality-item" id="qualityLight"><span><svg><use href="#i-sun"/></svg></span><b>Đủ sáng</b><small>Camera sẵn sàng</small></div>
+              <div class="quality-item" id="qualityPosition"><span><svg><use href="#i-user-scan"/></svg></span><b>Đúng vị trí</b><small>Chờ khuôn mặt</small></div>
+              <div class="quality-item" id="qualityClarity"><span><svg><use href="#i-users"/></svg></span><b>Khuôn mặt rõ</b><small>Đang kiểm tra</small></div>
+            </div>
+            <div class="enrollment-result" id="enrollmentResult" data-state="idle" tabindex="-1">
+              <span class="enrollment-result-icon"><svg><use href="#i-user-scan"/></svg></span>
+              <span><strong id="enrollmentResultTitle">Đưa khuôn mặt vào khung</strong><small id="enrollmentCameraStatus">Hệ thống sẽ tự động quét khi đạt yêu cầu</small></span>
+              <span class="enrollment-result-actions"><button class="cancel-capture" id="cancelEnrollmentCapture" type="button" hidden><svg><use href="#i-x"/></svg>Hủy ảnh quét</button><span class="camera-metric">FPS <b id="enrollmentFps">0</b></span></span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="page active" data-page="recognition">
+        <div class="recognition-grid">
+          <article class="card camera-card recognition-camera kiosk-recognition-camera"><div class="camera-slot" data-camera-slot="recognition"></div></article>
+          <article class="card recognition-monitor">
+            <div class="recognition-monitor-head"><span><svg><use href="#i-monitor"/></svg></span><div><h2>Giám sát cửa</h2><p>Trạng thái vận hành theo thời gian thực</p></div></div>
+            <div class="monitor-status-grid">
+              <div class="monitor-status-item"><span><svg><use href="#i-camera"/></svg></span><div><small>Camera kiosk</small><strong id="monitorCameraState">Đang kiểm tra...</strong></div></div>
+              <div class="monitor-status-item"><span><svg><use href="#i-target"/></svg></span><div><small>Dịch vụ nhận diện</small><strong id="monitorRecognitionState">Sẵn sàng</strong></div></div>
+              <div class="monitor-status-item"><span><svg><use href="#i-users"/></svg></span><div><small>Khuôn mặt hiện tại</small><strong id="monitorFaceCount">0 khuôn mặt</strong></div></div>
+              <div class="monitor-status-item"><span><svg><use href="#i-clock"/></svg></span><div><small>Tốc độ xử lý</small><strong id="monitorProcessingFps">0 FPS</strong></div></div>
+              <div class="monitor-status-item"><span><svg><use href="#i-monitor"/></svg></span><div><small>Bộ điều khiển cửa</small><strong id="monitorDoorState">Đang kiểm tra...</strong></div></div>
+              <div class="monitor-status-item"><span><svg><use href="#i-target"/></svg></span><div><small>Cảm biến vân tay</small><strong id="monitorFingerprintState">Chưa có trạng thái</strong></div></div>
+            </div>
+            <button class="secondary wide monitor-live-button" id="openLiveCamera" type="button"><svg><use href="#i-camera"/></svg>Xem camera trực tiếp</button>
+          </article>
+          <article class="card result-panel" id="recognitionResult"><div class="result-header"><span class="result-icon"><svg><use href="#i-target"/></svg></span><span><h2>Chờ xác thực</h2><p>Sử dụng khuôn mặt hoặc vân tay để xác minh quyền ra vào</p></span></div><div class="employee-summary"><div class="avatar placeholder"><svg><use href="#i-users"/></svg></div><div><h3>Chưa có lượt xác thực</h3><p>Mã NV: <b>---</b></p><p>Chức vụ: ---</p><p>Phòng ban: ---</p></div></div><div class="result-notice"><strong>Sẵn sàng tiếp nhận xác thực</strong><span>Phương thức: Khuôn mặt hoặc vân tay</span></div><div class="result-time"><svg><use href="#i-clock"/></svg><span><small>Thời gian xác thực</small><b>Chờ xác thực...</b></span></div><div class="result-actions"><input id="recognitionImageInput" type="file" accept="image/jpeg,image/png,image/bmp,image/webp" hidden><button class="secondary wide" id="testRecognitionImage">Công cụ kiểm thử ảnh</button><div class="status-action waiting" role="status">Quyền ra vào: Sẵn sàng xác thực</div><button class="secondary wide" id="retryRecognition" hidden>Thử lại</button></div></article>
+        </div>
+        <article class="card recent-card"><div class="card-title"><span><svg><use href="#i-clock"/></svg> Xác thực gần đây hôm nay</span><button class="link" data-route="history">Xem tất cả →</button></div><div class="table-wrap"><table><thead><tr><th>Thời gian</th><th>Nhân viên</th><th>Mã NV</th><th>Chức vụ</th><th>Phòng ban</th><th>Kết quả xác thực</th></tr></thead><tbody id="recentAttendance"></tbody></table></div></article>
+      </section>
+
+      <section class="page" data-page="employees">
+        <div class="employees-toolbar"><div class="search"><svg><use href="#i-search"/></svg><input id="employeeSearch" placeholder="Tìm theo tên hoặc mã nhân viên..."></div><button class="primary" id="addEmployee">+ Thêm nhân viên</button></div>
+        <div class="stats-grid" id="employeeStats"></div>
+        <article class="card table-card"><div class="card-title"><span>Hồ sơ nhân viên và phương thức xác thực</span></div><div class="table-wrap"><table><thead><tr><th>Nhân viên</th><th>Chức vụ</th><th>Phòng ban</th><th>Khuôn mặt</th><th>Vân tay</th><th>Quyền ra vào</th><th>Hành động</th></tr></thead><tbody id="employeeRows"></tbody></table></div><div class="pagination" id="employeePagination"></div></article>
+      </section>
+
+      <section class="page" data-page="fingerprints">
+        <div class="fingerprint-admin-grid" id="fingerprintAdmin">
+          <article class="card fingerprint-enroll-card">
+            <div class="card-title"><span><svg><use href="#i-user-add"/></svg> Đăng ký vân tay mới</span></div>
+            <form id="fingerprintEnrollForm" autocomplete="off">
+              <p id="fingerprintProfileHint">Chọn nhân viên hiện có hoặc nhập đầy đủ thông tin để tạo một hồ sơ mới.</p>
+              <label class="existing-profile-selector">Chọn hồ sơ đã có<select name="existing_employee_id" id="fingerprintEmployeeSelect"><option value="">Nhân viên mới — nhập thông tin bên dưới</option></select></label>
+              <label>Mã vân tay<input name="fingerprint_id" type="number" min="1" max="127" autocomplete="off" placeholder="Từ 1 đến 127" required></label>
+              <label>Mã nhân viên<input name="employee_id" list="fingerprintEmployeeOptions" maxlength="40" autocomplete="off" placeholder="Ví dụ: NV001" required><datalist id="fingerprintEmployeeOptions"></datalist></label>
+              <label>Họ và tên<input name="name" maxlength="80" autocomplete="off" placeholder="Người sở hữu vân tay" required></label>
+              <label>Chức vụ<input name="role" maxlength="80" autocomplete="organization-title" placeholder="Ví dụ: Kỹ sư phần mềm" required></label>
+              <label>Phòng ban<input name="department" maxlength="80" autocomplete="organization" placeholder="Ví dụ: Phòng IT" required></label>
+              <p>Đặt cùng một ngón tay hai lần theo hướng dẫn trên màn hình thiết bị. Giữ thiết bị hoạt động trong suốt quá trình đăng ký.</p>
+              <div class="fingerprint-form-actions">
+                <button class="secondary" id="cancelFingerprintEnrollment" type="button">Hủy đăng ký</button>
+                <button class="primary" id="fingerprintEnrollButton">Bắt đầu đăng ký</button>
+              </div>
+            </form>
+          </article>
+          <article class="card fingerprint-state-card">
+            <div class="card-title"><span><svg><use href="#i-monitor"/></svg> Tình trạng hệ thống vân tay</span></div>
+            <dl id="fingerprintManagementState"><div><dt>Kết nối thiết bị</dt><dd>Đang kiểm tra...</dd></div></dl>
+            <aside class="fingerprint-guide">
+              <h3>Hướng dẫn đăng ký</h3>
+              <ol>
+                <li><span>1</span><p><strong>Chọn hồ sơ nhân viên</strong><small>Nhập mã nhân viên để tự động điền thông tin đã có.</small></p></li>
+                <li><span>2</span><p><strong>Bắt đầu đăng ký</strong><small>Kiểm tra thông tin rồi nhấn nút đăng ký.</small></p></li>
+                <li><span>3</span><p><strong>Quét cùng một ngón tay</strong><small>Đặt ngón tay hai lần theo hướng dẫn trên thiết bị.</small></p></li>
+                <li><span>4</span><p><strong>Chờ hoàn tất</strong><small>Kết quả sẽ được cập nhật trong hồ sơ nhân viên.</small></p></li>
+              </ol>
+            </aside>
+          </article>
+        </div>
+        <article class="card table-card fingerprint-directory-card">
+          <div class="card-title">
+            <span><svg><use href="#i-fingerprint"/></svg> Nhân viên đã đăng ký vân tay</span>
+            <button class="link" id="refreshFingerprints" type="button">Làm mới</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Mã vân tay</th><th>Nhân viên</th><th>Mã NV</th><th>Chức vụ</th><th>Phòng ban</th><th>Trạng thái</th></tr></thead>
+              <tbody id="fingerprintRows"></tbody>
+            </table>
+          </div>
+          <div class="pagination" id="fingerprintPagination"></div>
+        </article>
+      </section>
+
+      <section class="page" data-page="history">
+        <div class="history-toolbar"><div class="search"><svg><use href="#i-search"/></svg><input id="historySearch" placeholder="Tìm nhân viên..."></div><select id="historyStatus"><option value="">Tất cả kết quả</option><option value="Thành công">Xác thực thành công</option><option value="Thất bại">Xác thực bị từ chối</option></select></div>
+        <article class="card table-card"><div class="card-title"><span>Toàn bộ nhật ký xác thực</span></div><div class="table-wrap"><table><thead><tr><th>Thời gian</th><th>Nhân viên</th><th>Mã NV</th><th>Chức vụ</th><th>Phòng ban</th><th>Kết quả xác thực</th></tr></thead><tbody id="historyRows"></tbody></table></div><div class="pagination" id="historyPagination"></div></article>
+      </section>
+    </main>
+  </div>
+
+  <div id="cameraSurface" class="camera-surface"><img id="cameraStream" alt="Camera FaceCheck"><div class="camera-loading"><span></span><b id="cameraLoadingText">Đang kết nối camera...</b></div></div>
+
+  <div class="modal-backdrop" id="modal" hidden><div class="modal" role="dialog" aria-modal="true" aria-label="Hộp thoại FaceCheck"><button class="modal-close" aria-label="Đóng"><svg><use href="#i-x"/></svg></button><div id="modalContent"></div></div></div>
+  <div class="toast-region" id="toasts" aria-live="polite"></div>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

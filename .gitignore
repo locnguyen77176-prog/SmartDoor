@@ -1,0 +1,40 @@
+# Environments
+venv/
+env/
+.env
+firmware/**/secrets.h
+firmware/**/factory_backup.bin
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+logs/
+*.log
+
+# Local browser/build artifacts
+/.codex-build/
+/.codex-output/
+/.codex-history-inspect/
+/.codex-history-backup/
+
+# Data and Models
+data/
+models/
+*.pt
+*.pth
+*.onnx
+
+# IDEs and Editors
+.vscode/
+.idea/
+.pio/
+compile_commands.json
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
