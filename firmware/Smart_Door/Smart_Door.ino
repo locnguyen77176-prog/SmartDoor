@@ -11,7 +11,7 @@
  *  - Display_Driver   : Giao tiếp OLED SSD1306
  *  - Fingerprint_Driver: Nhận diện vân tay AS608
  *  - Lock_Driver      : Điều khiển Relay + Còi báo
- *  - Telegram_Driver  : WiFi, Bot Telegram, Log, Push Notification
+ *  - Telegram_Driver  : WiFi, Bot Telegram, Push Notification
  */
 
 #include <Arduino.h>
@@ -25,7 +25,7 @@
 #include "Display_Driver.h"     // DisplayMsg, DisplayMsgType + API màn hình
 #include "Fingerprint_Driver.h" // API cảm biến vân tay AS608
 #include "Lock_Driver.h"        // API relay khóa cửa + còi báo
-#include "Telegram_Driver.h"    // API bot + addLog() + telegramNotifQueue
+#include "Telegram_Driver.h"    // API bot + telegramNotifQueue
 #include "MQTT_Driver.h"        // Wi-Fi + HiveMQ Cloud + heartbeat
 
 // ==========================================
@@ -220,10 +220,8 @@ void Task_Fingerprint(void *pvParameters) {
                 char msgBuf[TELEGRAM_NOTIF_MAX_LEN];
                 if (fpName.length() > 0) {
                     snprintf(msgBuf, sizeof(msgBuf), "🚪 Mở cửa - %s (ID #%d) lúc %s", fpName.c_str(), result, getTimeStr().c_str());
-                    addLog("Mở cửa: " + fpName + " (ID #" + String(result) + ")");
                 } else {
                     snprintf(msgBuf, sizeof(msgBuf), "🚪 Mở cửa - Vân tay #%d lúc %s", result, getTimeStr().c_str());
-                    addLog("Mở cửa: Vân tay #" + String(result));
                 }
 
                 if (telegramNotifQueue) {
@@ -254,7 +252,6 @@ void Task_Fingerprint(void *pvParameters) {
                                  "⚠️ CẢNH BÁO! Vân tay lạ bị từ chối lúc %s.", getTimeStr().c_str());
                         xQueueSend(telegramNotifQueue, &notif, 0);
                     }
-                    addLog("⚠️ Cảnh báo: Vân tay lạ");
                     lastWarningTime = millis();
                 }
 
@@ -322,8 +319,6 @@ void Task_Button(void *pvParameters) {
                              "🚪 Mở cửa từ nút nhấn bên trong lúc %s.", getTimeStr().c_str());
                     xQueueSend(telegramNotifQueue, &notif, 0);
                 }
-                addLog("Nút nhấn bên trong lúc " + getTimeStr());
-
                 vTaskDelay(pdMS_TO_TICKS(UNLOCK_DURATION + 300));
             }
         }
@@ -388,7 +383,7 @@ void setup() {
         xQueueSend(displayQueue, &errMsg, 0);
     }
 
-    // 3. Khởi tạo Telegram Driver (tạo queue + mutex nội bộ)
+    // 3. Khởi tạo Telegram Driver (tạo queue thông báo đẩy)
     initTelegram(displayQueue, lockEventGroup);
     initMQTT(
         serverUnlockQueue,

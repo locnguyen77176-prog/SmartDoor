@@ -6,9 +6,8 @@
  *  - Kết nối WiFi và tự động reconnect khi mất mạng
  *  - Đồng bộ thời gian thực qua NTP (UTC+7 Việt Nam)
  *  - Poll lệnh từ Telegram Bot mỗi 1.5 giây
- *  - Phân quyền: Admin (toàn quyền) / User thường (/open, /status)
+ *  - Phân quyền: Admin quản lý người dùng / User thường dùng /open
  *  - Gửi push notification cho mọi sự kiện phần cứng
- *  - Log ring buffer 10 sự kiện, bảo vệ bằng Mutex
  *
  * Thư viện cần cài (Arduino Library Manager):
  *  - UniversalTelegramBot by Brian Lough
@@ -25,8 +24,6 @@
 #include <UniversalTelegramBot.h>
 #include <ArduinoJson.h>
 #include <time.h>
-#include <freertos/semphr.h>
-
 #include <Preferences.h>
 #include <vector>
 
@@ -40,13 +37,6 @@ static EventGroupHandle_t _lockEventGroup = NULL;
 
 // Queue push notification (public - khai báo extern trong .h)
 QueueHandle_t telegramNotifQueue = NULL;
-
-// Log ring buffer
-#define LOG_BUFFER_SIZE     10
-static String            s_logBuffer[LOG_BUFFER_SIZE];
-static int               s_logHead  = 0;
-static int               s_logCount = 0;
-static SemaphoreHandle_t s_logMutex = NULL;
 
 // NVS Preferences cho tên vân tay và người dùng
 static Preferences prefNames;
@@ -150,39 +140,6 @@ String getTimeStr() {
 }
 
 // ==========================================
-// API CÔNG KHAI: LOG
-// ==========================================
-
-void addLog(const String &entry) {
-    if (!s_logMutex) return;
-    if (xSemaphoreTake(s_logMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        s_logBuffer[s_logHead] = entry;
-        s_logHead = (s_logHead + 1) % LOG_BUFFER_SIZE;
-        if (s_logCount < LOG_BUFFER_SIZE) s_logCount++;
-        xSemaphoreGive(s_logMutex);
-    }
-}
-
-String getLogString() {
-    String result = "📋 *LỊCH SỬ 10 SỰ KIỆN GẦN NHẤT:*\n\n";
-    if (!s_logMutex) return result + "_[Chưa khởi tạo]_";
-
-    if (xSemaphoreTake(s_logMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        if (s_logCount == 0) {
-            result += "_Chưa có sự kiện nào được ghi nhận._";
-        } else {
-            int start = (s_logHead - s_logCount + LOG_BUFFER_SIZE) % LOG_BUFFER_SIZE;
-            for (int i = 0; i < s_logCount; i++) {
-                int idx = (start + i) % LOG_BUFFER_SIZE;
-                result += String(i + 1) + ". " + s_logBuffer[idx] + "\n";
-            }
-        }
-        xSemaphoreGive(s_logMutex);
-    }
-    return result;
-}
-
-// ==========================================
 // API CÔNG KHAI: INIT
 // ==========================================
 
@@ -190,25 +147,13 @@ void initTelegram(QueueHandle_t displayQ, EventGroupHandle_t lockEvtGroup) {
     _displayQueue   = displayQ;
     _lockEventGroup = lockEvtGroup;
 
-    // Tạo queue push notification và mutex log
+    // Tạo queue push notification
     telegramNotifQueue = xQueueCreate(10, sizeof(TelegramNotif));
-    s_logMutex         = xSemaphoreCreateMutex();
 
     // Nạp danh sách user ủy quyền từ Flash
     loadAuthorizedUsers();
 
     Serial.println(F("[TELEGRAM] Driver da khoi tao thanh cong."));
-}
-
-#include "Fingerprint_Driver.h" // API quản lý vân tay AS608
-
-static UniversalTelegramBot *s_pBot = nullptr;
-static String s_activeChatId;
-
-static void telegramEnrollProgress(const char* msg) {
-    if (s_pBot && s_activeChatId.length() > 0) {
-        s_pBot->sendMessage(s_activeChatId, msg, "");
-    }
 }
 
 // ==========================================
@@ -224,28 +169,15 @@ static void handleBotCommand(UniversalTelegramBot &bot,
     if (text == "/start" || text == "/help") {
         String msg  = "🚪 *SMART DOOR CONTROLLER*\n\n";
         msg        += "*Lệnh khả dụng:*\n";
-        msg        += "/status - Xem trạng thái cửa\n";
         msg        += "/open   - Mở khóa từ xa\n";
         if (admin) {
             msg    += "\n*👑 Quản lý hệ thống (Admin):*\n";
-            msg    += "/log - Xem lịch sử sự kiện gần nhất\n";
-            msg    += "/count - Xem số lượng vân tay đã lưu\n";
-            msg    += "/add <ID> - Đăng ký vân tay mới (VD: `/add 1`)\n";
-            msg    += "/setname <ID> <Tên> - Đặt tên cho vân tay (VD: `/setname 1 Nguyễn Văn A`)\n";
-            msg    += "/delete <ID> - Xóa 1 vân tay (VD: `/delete 1`)\n";
-            msg    += "/clearall - Xóa TOÀN BỘ bộ nhớ vân tay\n";
             msg    += "/adduser <Chat_ID> - Ủy quyền cho người dùng mới\n";
             msg    += "/removeuser <Chat_ID> - Hủy ủy quyền người dùng\n";
             msg    += "/listuser - Xem danh sách người dùng được ủy quyền\n";
         }
         msg        += "\n/help - Hiển thị danh sách lệnh";
         bot.sendMessage(chatId, msg, "Markdown");
-    }
-
-    // --- /status ---
-    else if (text == "/status") {
-        String icon  = isLockOpen() ? "🚪 Cửa: *ĐANG MỞ*" : "🚪 Cửa: *ĐANG ĐÓNG*";
-        bot.sendMessage(chatId, icon + " `[" + getTimeStr() + "]`", "Markdown");
     }
 
     // --- /open (Cả Admin và User được ủy quyền đều dùng được) ---
@@ -266,123 +198,6 @@ static void handleBotCommand(UniversalTelegramBot &bot,
                 xEventGroupSetBits(_lockEventGroup, EVT_UNLOCK_TELEGRAM);
             }
 
-            String opener = admin ? "Admin" : ("User " + chatId);
-            addLog("Mở từ xa (" + opener + ") lúc " + getTimeStr());
-        }
-    }
-
-    // --- /log (Admin only) ---
-    else if (text == "/log") {
-        if (!admin) {
-            bot.sendMessage(chatId, "⛔ Chỉ Admin mới có quyền xem nhật ký sự kiện!", "");
-            return;
-        }
-        bot.sendMessage(chatId, getLogString(), "Markdown");
-    }
-
-    // --- /count (Admin only) ---
-    else if (text == "/count") {
-        if (!admin) {
-            bot.sendMessage(chatId, "⛔ Chỉ Admin mới có quyền xem số lượng vân tay!", "");
-            return;
-        }
-        uint16_t count = getFingerprintCount();
-        bot.sendMessage(chatId, "📊 Số lượng vân tay hiện có trong bộ nhớ: *" + String(count) + "/127*", "Markdown");
-    }
-
-    // --- /add <ID> (Admin only) ---
-    else if (text.startsWith("/add ")) {
-        if (!admin) {
-            bot.sendMessage(chatId, "⛔ Chỉ Admin mới có quyền đăng ký vân tay!", "");
-            return;
-        }
-        int spaceIdx = text.indexOf(' ');
-        if (spaceIdx == -1) {
-            bot.sendMessage(chatId, "⚠️ Cú pháp: `/add <ID (1-127)>`\nVí dụ: `/add 1`", "Markdown");
-            return;
-        }
-        int id = text.substring(spaceIdx + 1).toInt();
-        if (id < 1 || id > 127) {
-            bot.sendMessage(chatId, "❌ ID không hợp lệ! Chỉ chấp nhận ID từ 1 đến 127.", "");
-            return;
-        }
-
-        s_pBot = &bot;
-        s_activeChatId = chatId;
-        enrollFingerprint((uint8_t)id, telegramEnrollProgress);
-    }
-
-    // --- /setname <ID> <Tên> (Admin only) ---
-    else if (text.startsWith("/setname")) {
-        if (!admin) {
-            bot.sendMessage(chatId, "⛔ Chỉ Admin mới có quyền đặt tên cho vân tay!", "");
-            return;
-        }
-        int firstSpace = text.indexOf(' ');
-        if (firstSpace == -1) {
-            bot.sendMessage(chatId, "⚠️ Cú pháp: `/setname <ID> <Tên>`\nVí dụ: `/setname 1 Nguyễn Văn Lộc`", "Markdown");
-            return;
-        }
-        int secondSpace = text.indexOf(' ', firstSpace + 1);
-        if (secondSpace == -1) {
-            bot.sendMessage(chatId, "⚠️ Vui lòng nhập cả ID và Tên!\nVí dụ: `/setname 1 Nguyễn Văn Lộc`", "Markdown");
-            return;
-        }
-        int id = text.substring(firstSpace + 1, secondSpace).toInt();
-        String name = text.substring(secondSpace + 1);
-        name.trim();
-
-        if (id < 1 || id > 127 || name.length() == 0) {
-            bot.sendMessage(chatId, "❌ Dữ liệu không hợp lệ! ID phải từ 1 đến 127 và tên không được để trống.", "");
-            return;
-        }
-
-        setFingerprintName(id, name);
-        bot.sendMessage(chatId, "✅ Đã gán tên cho vân tay ID #" + String(id) + ": *" + name + "*", "Markdown");
-        addLog("Đặt tên ID #" + String(id) + " -> " + name);
-    }
-
-    // --- /delete <ID> (Admin only) ---
-    else if (text.startsWith("/delete")) {
-        if (!admin) {
-            bot.sendMessage(chatId, "⛔ Chỉ Admin mới có quyền xóa vân tay!", "");
-            return;
-        }
-        int spaceIdx = text.indexOf(' ');
-        if (spaceIdx == -1) {
-            bot.sendMessage(chatId, "⚠️ Cú pháp: `/delete <ID (1-127)>`\nVí dụ: `/delete 1`", "Markdown");
-            return;
-        }
-        int id = text.substring(spaceIdx + 1).toInt();
-        if (id < 1 || id > 127) {
-            bot.sendMessage(chatId, "❌ ID không hợp lệ!", "");
-            return;
-        }
-        if (deleteFingerprint((uint8_t)id)) {
-            removeFingerprintName(id);
-            bot.sendMessage(chatId, "✅ Đã xóa thành công vân tay ID #" + String(id) + "!", "");
-            addLog("Xóa vân tay #" + String(id));
-        } else {
-            bot.sendMessage(chatId, "❌ Không thể xóa vân tay ID #" + String(id) + " (có thể ID chưa tồn tại)!", "");
-        }
-    }
-
-    // --- /clearall (Admin only) ---
-    else if (text == "/clearall") {
-        if (!admin) {
-            bot.sendMessage(chatId, "⛔ Chỉ Admin mới có quyền xóa toàn bộ vân tay!", "");
-            return;
-        }
-        bot.sendMessage(chatId, "⚠️ *CẢNH BÁO!* Hành động này sẽ *XÓA TRẮNG* toàn bộ vân tay và tên đã lưu.\nGõ `/clearall confirm` để xác nhận.", "Markdown");
-    }
-    else if (text == "/clearall confirm") {
-        if (!admin) return;
-        if (emptyAllFingerprints()) {
-            clearAllFingerprintNames();
-            bot.sendMessage(chatId, "🗑️ Đã *XÓA TRẮNG* toàn bộ cơ sở dữ liệu vân tay!", "Markdown");
-            addLog("Xóa toàn bộ vân tay");
-        } else {
-            bot.sendMessage(chatId, "❌ Xóa toàn bộ vân tay THẤT BẠI!", "");
         }
     }
 
@@ -413,7 +228,6 @@ static void handleBotCommand(UniversalTelegramBot &bot,
         s_authorizedUsers.push_back(newChatId);
         saveAuthorizedUsers();
         bot.sendMessage(chatId, "✅ Đã thêm người dùng `" + newChatId + "` vào danh sách ủy quyền!", "Markdown");
-        addLog("Thêm user ủy quyền: " + newChatId);
     }
 
     // --- /removeuser <Chat_ID> (Admin only) ---
@@ -442,7 +256,6 @@ static void handleBotCommand(UniversalTelegramBot &bot,
         if (found) {
             saveAuthorizedUsers();
             bot.sendMessage(chatId, "✅ Đã xóa người dùng `" + targetChatId + "` khỏi danh sách ủy quyền.", "Markdown");
-            addLog("Xóa user ủy quyền: " + targetChatId);
         } else {
             bot.sendMessage(chatId, "❌ Không tìm thấy Chat ID `" + targetChatId + "` trong danh sách!", "Markdown");
         }

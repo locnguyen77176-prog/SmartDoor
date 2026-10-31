@@ -46,19 +46,6 @@ void initTelegram(QueueHandle_t displayQ, EventGroupHandle_t lockEvtGroup);
 void Task_Telegram(void *pvParameters);
 
 /**
- * @brief Thêm một entry vào log ring buffer (10 sự kiện gần nhất).
- *        Thread-safe (dùng Mutex nội bộ).
- * @param entry Chuỗi mô tả sự kiện
- */
-void addLog(const String &entry);
-
-/**
- * @brief Lấy toàn bộ log dưới dạng Markdown String để gửi qua Telegram.
- * @return String chứa danh sách 10 sự kiện gần nhất
- */
-String getLogString();
-
-/**
  * @brief Lấy chuỗi thời gian hiện tại (HH:MM:SS) từ NTP
  */
 String getTimeStr();
