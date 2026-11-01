@@ -29,7 +29,9 @@ class DoorRuntimeIntegrationTests(unittest.TestCase):
         with patch.object(runtime, "_add_attendance_record"):
             runtime._on_kiosk_recognition_success(employee, 0.25)
 
-        runtime.door_service.request_face_auth_result.assert_called_once_with(True)
+        runtime.door_service.request_face_auth_result.assert_called_once_with(
+            True, "Test User"
+        )
         runtime.door_service.request_open.assert_called_once_with("NV001")
 
     def test_attendance_duplicate_still_uses_door_anti_repeat_policy(self):
@@ -37,10 +39,14 @@ class DoorRuntimeIntegrationTests(unittest.TestCase):
         runtime._attendance_cooldowns["NV001"] = (time.time(), "10:00:00")
 
         with patch.object(runtime, "_add_attendance_record") as add_record:
-            runtime._on_kiosk_recognition_success({"id": "NV001"}, 0.25)
+            runtime._on_kiosk_recognition_success(
+                {"id": "NV001", "name": "Test User"}, 0.25
+            )
 
         add_record.assert_not_called()
-        runtime.door_service.request_face_auth_result.assert_called_once_with(True)
+        runtime.door_service.request_face_auth_result.assert_called_once_with(
+            True, "Test User"
+        )
         runtime.door_service.request_open.assert_called_once_with("NV001")
 
     def test_failed_face_recognition_notifies_telegram_bridge(self):

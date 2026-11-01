@@ -623,7 +623,9 @@ class DoorService:
             "FINGERPRINT_DELETE", fingerprint_id
         )
 
-    def request_face_auth_result(self, success: bool) -> dict:
+    def request_face_auth_result(
+        self, success: bool, employee_name: str = ""
+    ) -> dict:
         """Publish a short-lived face decision for the ESP32 Telegram bot."""
         with self._lock:
             if not self.enabled:
@@ -633,6 +635,12 @@ class DoorService:
 
             command_id = f"face-auth-{uuid.uuid4().hex[:12]}"
             issued_at = int(self._epoch_time())
+            safe_name = (
+                str(employee_name or "")
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .strip()[:60]
+            )
             payload = {
                 "command": "FACE_AUTH_RESULT",
                 "command_id": command_id,
@@ -642,10 +650,12 @@ class DoorService:
                 "expires_at": issued_at + 10,
                 "source": "face_recognition",
             }
+            if success and safe_name:
+                payload["employee_name"] = safe_name
             try:
                 info = self.client.publish(
                     self.command_topic,
-                    json.dumps(payload, separators=(",", ":")),
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                     qos=1,
                     retain=False,
                 )

@@ -298,14 +298,25 @@ void handleFaceAuthResult(JsonDocument &document, const char *commandId) {
     }
 
     TelegramNotif notification = {};
-    snprintf(
-        notification.message,
-        sizeof(notification.message),
-        success
-            ? "✅ Nhận diện khuôn mặt THÀNH CÔNG lúc %s."
-            : "⚠️ CẢNH BÁO! Nhận diện khuôn mặt THẤT BẠI lúc %s.",
-        getTimeStr().c_str()
-    );
+    const char *employeeName = document["employee_name"] | "";
+    if (success && employeeName[0] != '\0') {
+        snprintf(
+            notification.message,
+            sizeof(notification.message),
+            "✅ Nhận diện khuôn mặt THÀNH CÔNG - %s lúc %s.",
+            employeeName,
+            getTimeStr().c_str()
+        );
+    } else {
+        snprintf(
+            notification.message,
+            sizeof(notification.message),
+            success
+                ? "✅ Nhận diện khuôn mặt THÀNH CÔNG lúc %s."
+                : "⚠️ CẢNH BÁO! Nhận diện khuôn mặt THẤT BẠI lúc %s.",
+            getTimeStr().c_str()
+        );
+    }
     if (xQueueSend(telegramNotifQueue, &notification, 0) != pdTRUE) {
         publishAck(commandId, "FACE_AUTH_RESULT", "failed", "telegram_queue_full");
         return;

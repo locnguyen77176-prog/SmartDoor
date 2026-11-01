@@ -802,7 +802,7 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
             "department": emp_info.get("department") or emp_info.get("dept") or "Phòng IT",
             "image_url": self._employee_image_url(emp_id, emp_info),
         }
-        self.door_service.request_face_auth_result(True)
+        self.door_service.request_face_auth_result(True, employee["name"])
         door_decision = self.door_service.request_open(emp_id)
         if not door_decision.get("accepted"):
             print(

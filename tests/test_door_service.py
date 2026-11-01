@@ -113,7 +113,7 @@ class DoorServiceTests(unittest.TestCase):
     def test_face_auth_result_is_short_lived_and_non_retained(self):
         self.connect()
 
-        decision = self.service.request_face_auth_result(False)
+        decision = self.service.request_face_auth_result(False, "Tên không được gửi")
 
         self.assertTrue(decision["accepted"])
         topic, raw_payload, qos, retain = self.client.published[0]
@@ -121,9 +121,20 @@ class DoorServiceTests(unittest.TestCase):
         self.assertEqual(topic, "smartdoor/v1/door-01/command")
         self.assertEqual(payload["command"], "FACE_AUTH_RESULT")
         self.assertEqual(payload["result"], "failed")
+        self.assertNotIn("employee_name", payload)
         self.assertEqual(payload["expires_at"] - payload["issued_at"], 10)
         self.assertEqual(qos, 1)
         self.assertFalse(retain)
+
+    def test_successful_face_auth_result_includes_employee_name(self):
+        self.connect()
+
+        decision = self.service.request_face_auth_result(True, "Nguyễn Văn A")
+
+        self.assertTrue(decision["accepted"])
+        payload = json.loads(self.client.published[0][1])
+        self.assertEqual(payload["result"], "success")
+        self.assertEqual(payload["employee_name"], "Nguyễn Văn A")
 
     def test_finished_requires_face_exit_and_cooldown_before_rearming(self):
         self.connect()
