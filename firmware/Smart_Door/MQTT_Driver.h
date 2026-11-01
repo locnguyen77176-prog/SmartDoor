@@ -13,6 +13,7 @@ struct ServerUnlockRequest {
 struct FingerprintCommandRequest {
     char commandId[49];
     char command[24];
+    char employeeName[97];
     uint8_t fingerprintId;
     int64_t expiresAt;
 };

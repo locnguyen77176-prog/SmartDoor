@@ -309,6 +309,7 @@ class DoorService:
             print(
                 f"[DOOR] Da ket noi; subscribe ACK/event/status cho {self.device_id}"
             )
+            self._sync_fingerprint_names()
         else:
             print(f"[DOOR] MQTT tu choi ket noi: {reason_code}")
         self._notify_change()
@@ -507,6 +508,57 @@ class DoorService:
             item = self.fingerprint_registry.get(str(int(fingerprint_id)))
             return dict(item) if item else None
 
+    @staticmethod
+    def _mqtt_safe_name(value, max_bytes: int = 72) -> str:
+        text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
+        return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+
+    def _publish_fingerprint_name_sync(self, fingerprint_id: int, name: str) -> dict:
+        safe_name = self._mqtt_safe_name(name)
+        if not safe_name:
+            return {"accepted": False, "reason": "fingerprint_name_required"}
+        with self._lock:
+            if not self.enabled or not self.connected:
+                return {"accepted": False, "reason": "mqtt_disconnected"}
+            command_id = f"fp-name-{uuid.uuid4().hex[:12]}"
+            issued_at = int(self._epoch_time())
+            payload = {
+                "command": "FINGERPRINT_SET_NAME",
+                "command_id": command_id,
+                "device_id": self.device_id,
+                "fingerprint_id": int(fingerprint_id),
+                "employee_name": safe_name,
+                "issued_at": issued_at,
+                "expires_at": issued_at + 15,
+                "source": "server_registry_sync",
+            }
+            try:
+                info = self.client.publish(
+                    self.command_topic,
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    qos=1,
+                    retain=False,
+                )
+            except Exception:
+                return {"accepted": False, "reason": "publish_error"}
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                return {"accepted": False, "reason": "publish_failed"}
+        return {"accepted": True, "command_id": command_id}
+
+    def _sync_fingerprint_names(self) -> None:
+        with self._lock:
+            registry = [dict(item) for item in self.fingerprint_registry.values()]
+        synced = 0
+        for item in registry:
+            fingerprint_id = int(item.get("fingerprint_id") or 0)
+            name = str(item.get("name") or "").strip()
+            if not 1 <= fingerprint_id <= 127 or not name:
+                continue
+            if self._publish_fingerprint_name_sync(fingerprint_id, name).get("accepted"):
+                synced += 1
+        if synced:
+            print(f"[DOOR] Da yeu cau dong bo {synced} ten van tay vao ESP32 NVS.")
+
     def update_fingerprint_identity(
         self, fingerprint_id: int, employee_id: str, name: str,
         role: str | None = None, department: str | None = None,
@@ -535,6 +587,7 @@ class DoorService:
             }
             self.fingerprint_registry[key] = updated
             self._save_fingerprint_registry()
+        self._publish_fingerprint_name_sync(fingerprint_id, name)
         self._notify_change()
         return dict(updated)
 
@@ -577,10 +630,12 @@ class DoorService:
                 "expires_at": issued_at + 15,
                 "source": "server_management",
             }
+            if command == "FINGERPRINT_ENROLL":
+                payload["employee_name"] = self._mqtt_safe_name(name)
             try:
                 info = self.client.publish(
                     self.command_topic,
-                    json.dumps(payload, separators=(",", ":")),
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                     qos=1,
                     retain=False,
                 )

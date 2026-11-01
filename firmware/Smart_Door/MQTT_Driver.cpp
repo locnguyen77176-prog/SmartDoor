@@ -212,6 +212,10 @@ void handleFingerprintCommand(
     FingerprintCommandRequest request = {};
     strlcpy(request.commandId, commandId, sizeof(request.commandId));
     strlcpy(request.command, command, sizeof(request.command));
+    if (strcmp(command, "FINGERPRINT_ENROLL") == 0) {
+        const char *employeeName = document["employee_name"] | "";
+        strlcpy(request.employeeName, employeeName, sizeof(request.employeeName));
+    }
     request.fingerprintId = static_cast<uint8_t>(fingerprintId);
     request.expiresAt = expiresAt;
     if (xQueueSend(fingerprintQueue, &request, 0) != pdTRUE) {
@@ -220,6 +224,38 @@ void handleFingerprintCommand(
     }
     rememberCommand(commandId);
     Serial.printf("[MQTT] Da dua %s ID #%d vao hang doi.\n", command, fingerprintId);
+}
+
+void handleFingerprintNameSync(JsonDocument &document, const char *commandId) {
+    if (wasCommandSeen(commandId)) {
+        publishAck(commandId, "FINGERPRINT_SET_NAME", "failed", "duplicate_command");
+        return;
+    }
+    const int fingerprintId = document["fingerprint_id"] | 0;
+    const char *employeeName = document["employee_name"] | "";
+    if (fingerprintId < 1 || fingerprintId > 127) {
+        publishAck(commandId, "FINGERPRINT_SET_NAME", "failed", "invalid_fingerprint_id");
+        return;
+    }
+    if (employeeName[0] == '\0' || strlen(employeeName) > 96) {
+        publishAck(commandId, "FINGERPRINT_SET_NAME", "failed", "invalid_employee_name");
+        return;
+    }
+    int64_t expiresAt = 0;
+    if (!commandExpiryIsValid(document, expiresAt)) {
+        publishAck(
+            commandId,
+            "FINGERPRINT_SET_NAME",
+            "failed",
+            "invalid_or_expired_command"
+        );
+        return;
+    }
+
+    setFingerprintName(fingerprintId, String(employeeName));
+    rememberCommand(commandId);
+    publishAck(commandId, "FINGERPRINT_SET_NAME", "finished");
+    Serial.printf("[MQTT] Da dong bo ten van tay ID #%d vao NVS.\n", fingerprintId);
 }
 
 void handleOpenCommand(JsonDocument &document, const char *commandId) {
@@ -371,6 +407,10 @@ void onMQTTMessage(char *topic, byte *payload, unsigned int length) {
     if (strcmp(command, "FINGERPRINT_ENROLL") == 0 ||
         strcmp(command, "FINGERPRINT_DELETE") == 0) {
         handleFingerprintCommand(document, commandId, command);
+        return;
+    }
+    if (strcmp(command, "FINGERPRINT_SET_NAME") == 0) {
+        handleFingerprintNameSync(document, commandId);
         return;
     }
 

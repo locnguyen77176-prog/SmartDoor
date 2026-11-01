@@ -25,6 +25,7 @@
 #include <ArduinoJson.h>
 #include <time.h>
 #include <Preferences.h>
+#include <freertos/semphr.h>
 #include <vector>
 
 // ==========================================
@@ -42,6 +43,7 @@ QueueHandle_t telegramNotifQueue = NULL;
 static Preferences prefNames;
 static Preferences prefUsers;
 static std::vector<String> s_authorizedUsers;
+static SemaphoreHandle_t s_nameMutex = NULL;
 
 // ==========================================
 // QUẢN LÝ NGƯỜI DÙNG ỦY QUYỀN (NVS)
@@ -93,14 +95,23 @@ static bool isAuthorized(const String &chatId) {
 // ==========================================
 
 String getFingerprintName(int id) {
+    if (s_nameMutex && xSemaphoreTake(s_nameMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println(F("[NVS] Khong the khoa bo nho ten van tay de doc."));
+        return "";
+    }
     prefNames.begin("fp_names", true); // read-only
     String key = "id_" + String(id);
     String name = prefNames.getString(key.c_str(), "");
     prefNames.end();
+    if (s_nameMutex) xSemaphoreGive(s_nameMutex);
     return name;
 }
 
 void setFingerprintName(int id, const String &name) {
+    if (s_nameMutex && xSemaphoreTake(s_nameMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println(F("[NVS] Khong the khoa bo nho ten van tay de ghi."));
+        return;
+    }
     prefNames.begin("fp_names", false); // read-write
     String key = "id_" + String(id);
     if (name.length() > 0) {
@@ -109,19 +120,30 @@ void setFingerprintName(int id, const String &name) {
         prefNames.remove(key.c_str());
     }
     prefNames.end();
+    if (s_nameMutex) xSemaphoreGive(s_nameMutex);
 }
 
 void removeFingerprintName(int id) {
+    if (s_nameMutex && xSemaphoreTake(s_nameMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println(F("[NVS] Khong the khoa bo nho ten van tay de xoa."));
+        return;
+    }
     prefNames.begin("fp_names", false);
     String key = "id_" + String(id);
     prefNames.remove(key.c_str());
     prefNames.end();
+    if (s_nameMutex) xSemaphoreGive(s_nameMutex);
 }
 
 void clearAllFingerprintNames() {
+    if (s_nameMutex && xSemaphoreTake(s_nameMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println(F("[NVS] Khong the khoa bo nho ten van tay de xoa tat ca."));
+        return;
+    }
     prefNames.begin("fp_names", false);
     prefNames.clear();
     prefNames.end();
+    if (s_nameMutex) xSemaphoreGive(s_nameMutex);
 }
 
 // ==========================================
@@ -146,6 +168,13 @@ String getTimeStr() {
 void initTelegram(QueueHandle_t displayQ, EventGroupHandle_t lockEvtGroup) {
     _displayQueue   = displayQ;
     _lockEventGroup = lockEvtGroup;
+
+    if (!s_nameMutex) {
+        s_nameMutex = xSemaphoreCreateMutex();
+        if (!s_nameMutex) {
+            Serial.println(F("[NVS] Khong the tao mutex cho ten van tay."));
+        }
+    }
 
     // Tạo queue push notification
     telegramNotifQueue = xQueueCreate(10, sizeof(TelegramNotif));

@@ -154,18 +154,26 @@ void Task_Fingerprint(void *pvParameters) {
                     const char* enrollError = getLastFingerprintEnrollError();
                     if (enrollError != nullptr) failureReason = enrollError;
                 }
-                queueMQTTAck(
-                    managementRequest.commandId, managementRequest.command,
-                    succeeded ? "finished" : "failed",
-                    succeeded ? nullptr : failureReason
-                );
                 if (succeeded) {
+                    if (enroll) {
+                        setFingerprintName(
+                            managementRequest.fingerprintId,
+                            String(managementRequest.employeeName)
+                        );
+                    } else {
+                        removeFingerprintName(managementRequest.fingerprintId);
+                    }
                     queueMQTTEvent(
                         enroll ? "fingerprint_enrolled" : "fingerprint_deleted",
                         "server_management",
                         managementRequest.fingerprintId
                     );
                 }
+                queueMQTTAck(
+                    managementRequest.commandId, managementRequest.command,
+                    succeeded ? "finished" : "failed",
+                    succeeded ? nullptr : failureReason
+                );
                 DisplayMsg resultMsg = {
                     succeeded
                         ? (enroll ? DISP_FP_SAVED : DISP_FP_DELETED)

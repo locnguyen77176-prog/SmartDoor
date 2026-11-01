@@ -57,6 +57,8 @@ class DoorServiceTests(unittest.TestCase):
             face_exit_seconds=1.5,
             ack_timeout_seconds=12.0,
         )
+        # Keep unit tests isolated from the project's persisted registry.
+        self.service.fingerprint_registry = {}
 
     def connect(self):
         self.service._on_connect(self.client, None, None, 0)
@@ -189,6 +191,7 @@ class DoorServiceTests(unittest.TestCase):
         self.assertEqual(topic, self.service.command_topic)
         self.assertEqual(payload["command"], "FINGERPRINT_ENROLL")
         self.assertEqual(payload["fingerprint_id"], 12)
+        self.assertEqual(payload["employee_name"], "Nguyen Van A")
         self.assertEqual(payload["expires_at"] - payload["issued_at"], 15)
         self.assertNotIn("name", payload)
         self.assertNotIn("employee_id", payload)
@@ -221,6 +224,46 @@ class DoorServiceTests(unittest.TestCase):
         self.assertEqual(updated["name"], "Nguyen Van B")
         self.assertEqual(updated["status"], "active")
         self.assertEqual(self.client.published, [])
+
+    def test_fingerprint_identity_update_syncs_name_to_esp_nvs(self):
+        self.service.fingerprint_registry["2"] = {
+            "fingerprint_id": 2,
+            "employee_id": "",
+            "name": "Van tay #2",
+            "status": "observed",
+        }
+        self.connect()
+        self.client.published.clear()
+
+        self.service.update_fingerprint_identity(2, "NV002", "Nguyen Van B")
+
+        topic, raw_payload, qos, retain = self.client.published[-1]
+        payload = json.loads(raw_payload)
+        self.assertEqual(topic, self.service.command_topic)
+        self.assertEqual(payload["command"], "FINGERPRINT_SET_NAME")
+        self.assertEqual(payload["fingerprint_id"], 2)
+        self.assertEqual(payload["employee_name"], "Nguyen Van B")
+        self.assertEqual(qos, 1)
+        self.assertFalse(retain)
+
+    def test_connect_resyncs_existing_fingerprint_names_to_esp_nvs(self):
+        self.service.fingerprint_registry["7"] = {
+            "fingerprint_id": 7,
+            "employee_id": "NV007",
+            "name": "Tran Thi C",
+            "status": "active",
+        }
+
+        self.connect()
+
+        payloads = [json.loads(item[1]) for item in self.client.published]
+        sync = next(
+            payload
+            for payload in payloads
+            if payload.get("command") == "FINGERPRINT_SET_NAME"
+        )
+        self.assertEqual(sync["fingerprint_id"], 7)
+        self.assertEqual(sync["employee_name"], "Tran Thi C")
 
     def test_connect_subscribes_to_ack_event_and_status(self):
         self.connect()
