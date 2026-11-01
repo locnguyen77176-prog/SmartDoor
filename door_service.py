@@ -623,6 +623,45 @@ class DoorService:
             "FINGERPRINT_DELETE", fingerprint_id
         )
 
+    def request_face_auth_result(self, success: bool) -> dict:
+        """Publish a short-lived face decision for the ESP32 Telegram bot."""
+        with self._lock:
+            if not self.enabled:
+                return {"accepted": False, "reason": "disabled_or_unconfigured"}
+            if not self.connected:
+                return {"accepted": False, "reason": "mqtt_disconnected"}
+
+            command_id = f"face-auth-{uuid.uuid4().hex[:12]}"
+            issued_at = int(self._epoch_time())
+            payload = {
+                "command": "FACE_AUTH_RESULT",
+                "command_id": command_id,
+                "device_id": self.device_id,
+                "result": "success" if success else "failed",
+                "issued_at": issued_at,
+                "expires_at": issued_at + 10,
+                "source": "face_recognition",
+            }
+            try:
+                info = self.client.publish(
+                    self.command_topic,
+                    json.dumps(payload, separators=(",", ":")),
+                    qos=1,
+                    retain=False,
+                )
+            except Exception as exc:
+                self.last_error = f"face_auth_publish_error:{exc}"
+                return {"accepted": False, "reason": "publish_error"}
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                self.last_error = f"face_auth_publish_failed:{info.rc}"
+                return {"accepted": False, "reason": "publish_failed"}
+
+        print(
+            f"[DOOR] Da gui ket qua khuon mat {payload['result']} "
+            f"({command_id})"
+        )
+        return {"accepted": True, "command_id": command_id}
+
     def request_open(self, employee_id: str) -> dict:
         """Try to publish one OPEN command; returns a non-throwing decision."""
         now = self._monotonic()

@@ -153,6 +153,32 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
             "metrics": None,
         }
 
+    @classmethod
+    def _json_safe(cls, value):
+        """Replace NaN/Infinity recursively so runtime payloads are valid JSON."""
+        if isinstance(value, dict):
+            return {key: cls._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, deque)):
+            return [cls._json_safe(item) for item in value]
+        if isinstance(value, (float, np.floating)):
+            number = float(value)
+            return number if math.isfinite(number) else None
+        if isinstance(value, np.integer):
+            return int(value)
+        return value
+
+    @staticmethod
+    def _finite_metric(value, digits=4):
+        if value is None:
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number):
+            return None
+        return round(number, digits) if digits is not None else number
+
     def start(self):
         with self._lock:
             if self._started:
@@ -198,7 +224,7 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
 
     def snapshot(self):
         with self._lock:
-            return {
+            payload = {
                 "version": self._event_version,
                 "mode": self.current_page,
                 "camera": {
@@ -241,6 +267,7 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
                 },
                 "history_version": self._attendance_history_version,
             }
+            return self._json_safe(payload)
 
     def _access_snapshot(self):
         """Return one product-facing result for face and fingerprint access."""
@@ -580,11 +607,15 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
             **self._idle_payload(), "state": "strict_confirmation",
             "title": "Đang kiểm tra quyền mở cửa",
             "message": f"Đang gộp đặc trưng chống nhiễu JPEG · {votes}/2 frame",
-            "metrics": {"distance": distance, "margin": margin},
+            "metrics": {
+                "distance": self._finite_metric(distance),
+                "margin": self._finite_metric(margin),
+            },
         }
         self._publish()
 
     def _add_attendance_record(self, record):
+        record = self._json_safe(record)
         with self._lock:
             self.attendance_history.insert(0, record)
             del self.attendance_history[100:]
@@ -771,6 +802,7 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
             "department": emp_info.get("department") or emp_info.get("dept") or "Phòng IT",
             "image_url": self._employee_image_url(emp_id, emp_info),
         }
+        self.door_service.request_face_auth_result(True)
         door_decision = self.door_service.request_open(emp_id)
         if not door_decision.get("accepted"):
             print(
@@ -801,20 +833,24 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
 
     def _on_kiosk_recognition_ambiguous(self, best_distance, second_distance, margin):
         now_value = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+        self.door_service.request_face_auth_result(False)
+        safe_best_distance = self._finite_metric(best_distance)
+        safe_second_distance = self._finite_metric(second_distance)
+        safe_margin = self._finite_metric(margin)
         self._add_attendance_record({
             "time": now_value, "name": "Chưa xác định", "id": "—",
             "role": "—", "dept": "—", "status": "Thất bại",
             "reason": "Không đủ độ tin cậy",
-            "distance": round(float(best_distance), 4),
-            "second_distance": round(float(second_distance), 4),
-            "margin": round(float(margin), 4),
+            "distance": safe_best_distance,
+            "second_distance": safe_second_distance,
+            "margin": safe_margin,
         })
         self.recognition_state = {
             **self._idle_payload(), "state": "ambiguous",
             "title": "Không thể xác minh danh tính",
             "message": "Không có hồ sơ nào đủ độ tin cậy",
             "timestamp": now_value,
-            "metrics": {"distance": best_distance, "margin": margin},
+            "metrics": {"distance": safe_best_distance, "margin": safe_margin},
         }
         self._hold_result_and_suppress_active_face()
         self.is_recognizing = False
@@ -823,10 +859,11 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
 
     def _on_kiosk_recognition_failed(self, distance):
         now_value = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+        self.door_service.request_face_auth_result(False)
         self._add_attendance_record({
             "time": now_value, "name": "Người lạ / Khách", "id": "—",
             "role": "Chưa đăng ký", "dept": "—", "status": "Thất bại",
-            "distance": round(float(distance), 4) if distance is not None else None,
+            "distance": self._finite_metric(distance),
         })
         self.recognition_state = {
             **self._idle_payload(), "state": "unknown",
@@ -897,14 +934,14 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
                 "file": self.recognition_test_result.get("display_name") or result.get("file"),
                 "conclusion": result.get("conclusion"),
                 "best": {"id": best.get("id"), "name": best.get("name")},
-                "best_distance": round(float(result.get("best_distance", 0)), 4),
+                "best_distance": self._finite_metric(result.get("best_distance", 0)),
                 "second": {"id": second.get("id"), "name": second.get("name")},
                 "second_distance": (
                     round(float(second_distance), 4)
                     if second_distance is not None and second_distance != float("inf")
                     else None
                 ),
-                "margin": round(float(result.get("margin", 0)), 4),
+                "margin": self._finite_metric(result.get("margin", 0)),
             }
         self.recognition_test_result = {
             "version": version,

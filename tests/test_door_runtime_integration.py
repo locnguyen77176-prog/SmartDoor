@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import json
 import unittest
 from unittest.mock import Mock, patch
 
@@ -28,6 +29,7 @@ class DoorRuntimeIntegrationTests(unittest.TestCase):
         with patch.object(runtime, "_add_attendance_record"):
             runtime._on_kiosk_recognition_success(employee, 0.25)
 
+        runtime.door_service.request_face_auth_result.assert_called_once_with(True)
         runtime.door_service.request_open.assert_called_once_with("NV001")
 
     def test_attendance_duplicate_still_uses_door_anti_repeat_policy(self):
@@ -38,7 +40,30 @@ class DoorRuntimeIntegrationTests(unittest.TestCase):
             runtime._on_kiosk_recognition_success({"id": "NV001"}, 0.25)
 
         add_record.assert_not_called()
+        runtime.door_service.request_face_auth_result.assert_called_once_with(True)
         runtime.door_service.request_open.assert_called_once_with("NV001")
+
+    def test_failed_face_recognition_notifies_telegram_bridge(self):
+        runtime = self.make_runtime()
+
+        with patch.object(runtime, "_add_attendance_record"):
+            runtime._on_kiosk_recognition_failed(0.9)
+
+        runtime.door_service.request_face_auth_result.assert_called_once_with(False)
+        runtime.door_service.request_open.assert_not_called()
+
+    def test_non_finite_face_metrics_are_json_safe(self):
+        runtime = self.make_runtime()
+        runtime.attendance_history = []
+
+        with patch.object(runtime, "_save_attendance_history"):
+            runtime._on_kiosk_recognition_ambiguous(0.51, float("inf"), float("inf"))
+
+        record = runtime.attendance_history[0]
+        self.assertIsNone(record["second_distance"])
+        self.assertIsNone(record["margin"])
+        self.assertIsNone(runtime.recognition_state["metrics"]["margin"])
+        json.dumps(runtime.snapshot(), allow_nan=False)
 
     def test_runtime_lifecycle_starts_and_stops_door_service(self):
         runtime = self.make_runtime()

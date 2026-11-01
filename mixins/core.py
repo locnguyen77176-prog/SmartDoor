@@ -97,7 +97,14 @@ class CoreMixin:
         if hist_file.exists():
             try:
                 with open(hist_file, "r", encoding="utf-8") as f:
-                    self.attendance_history = json.load(f)
+                    history = json.load(f)
+                    sanitizer = getattr(self, "_json_safe", None)
+                    self.attendance_history = (
+                        sanitizer(history) if callable(sanitizer) else history
+                    )
+                    if self.attendance_history != history:
+                        self._save_attendance_history()
+                        print("[HISTORY] Da lam sach NaN/Infinity trong lich su.")
                     return
             except Exception as e:
                 print(f"[HISTORY] Lỗi đọc file lịch sử: {e}")
@@ -109,7 +116,13 @@ class CoreMixin:
             hist_file = Path("data/attendance_history.json")
             hist_file.parent.mkdir(parents=True, exist_ok=True)
             with open(hist_file, "w", encoding="utf-8") as f:
-                json.dump(self.attendance_history, f, ensure_ascii=False, indent=2)
+                json.dump(
+                    self.attendance_history,
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                    allow_nan=False,
+                )
         except Exception as e:
             print(f"[HISTORY] Lỗi lưu file lịch sử: {e}")
 

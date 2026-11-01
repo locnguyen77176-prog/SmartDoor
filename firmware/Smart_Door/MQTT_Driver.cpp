@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "MQTT_Certificates.h"
+#include "Telegram_Driver.h"
 #include "config.h"
 
 namespace {
@@ -268,6 +269,53 @@ void handleOpenCommand(JsonDocument &document, const char *commandId) {
     Serial.printf("[MQTT] Da dua OPEN %s vao hang doi khoa.\n", commandId);
 }
 
+void handleFaceAuthResult(JsonDocument &document, const char *commandId) {
+    if (wasCommandSeen(commandId)) {
+        publishAck(commandId, "FACE_AUTH_RESULT", "failed", "duplicate_command");
+        return;
+    }
+
+    int64_t expiresAt = 0;
+    if (!commandExpiryIsValid(document, expiresAt)) {
+        publishAck(
+            commandId,
+            "FACE_AUTH_RESULT",
+            "failed",
+            "invalid_or_expired_command"
+        );
+        return;
+    }
+
+    const char *result = document["result"] | "";
+    const bool success = strcmp(result, "success") == 0;
+    if (!success && strcmp(result, "failed") != 0) {
+        publishAck(commandId, "FACE_AUTH_RESULT", "failed", "invalid_result");
+        return;
+    }
+    if (!telegramNotifQueue) {
+        publishAck(commandId, "FACE_AUTH_RESULT", "failed", "telegram_unavailable");
+        return;
+    }
+
+    TelegramNotif notification = {};
+    snprintf(
+        notification.message,
+        sizeof(notification.message),
+        success
+            ? "✅ Nhận diện khuôn mặt THÀNH CÔNG lúc %s."
+            : "⚠️ CẢNH BÁO! Nhận diện khuôn mặt THẤT BẠI lúc %s.",
+        getTimeStr().c_str()
+    );
+    if (xQueueSend(telegramNotifQueue, &notification, 0) != pdTRUE) {
+        publishAck(commandId, "FACE_AUTH_RESULT", "failed", "telegram_queue_full");
+        return;
+    }
+
+    rememberCommand(commandId);
+    publishAck(commandId, "FACE_AUTH_RESULT", "received");
+    Serial.printf("[MQTT] Da dua ket qua khuon mat %s vao Telegram.\n", result);
+}
+
 void onMQTTMessage(char *topic, byte *payload, unsigned int length) {
     if (strcmp(topic, commandTopic) != 0) return;
 
@@ -303,6 +351,10 @@ void onMQTTMessage(char *topic, byte *payload, unsigned int length) {
     }
     if (strcmp(command, "OPEN") == 0) {
         handleOpenCommand(document, commandId);
+        return;
+    }
+    if (strcmp(command, "FACE_AUTH_RESULT") == 0) {
+        handleFaceAuthResult(document, commandId);
         return;
     }
     if (strcmp(command, "FINGERPRINT_ENROLL") == 0 ||

@@ -110,6 +110,21 @@ class DoorServiceTests(unittest.TestCase):
         self.assertEqual(payload["expires_at"] - payload["issued_at"], 10)
         self.assertEqual(payload["employee_id"], "NV001")
 
+    def test_face_auth_result_is_short_lived_and_non_retained(self):
+        self.connect()
+
+        decision = self.service.request_face_auth_result(False)
+
+        self.assertTrue(decision["accepted"])
+        topic, raw_payload, qos, retain = self.client.published[0]
+        payload = json.loads(raw_payload)
+        self.assertEqual(topic, "smartdoor/v1/door-01/command")
+        self.assertEqual(payload["command"], "FACE_AUTH_RESULT")
+        self.assertEqual(payload["result"], "failed")
+        self.assertEqual(payload["expires_at"] - payload["issued_at"], 10)
+        self.assertEqual(qos, 1)
+        self.assertFalse(retain)
+
     def test_finished_requires_face_exit_and_cooldown_before_rearming(self):
         self.connect()
         command = self.service.request_open("NV001")
