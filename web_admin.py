@@ -182,11 +182,18 @@ def main(simulate_pi=False):
     else:
         print("[WEB UI] FaceCheck đã chạy; tái sử dụng backend và camera hiện có.")
 
+    force_browser_ui = os.getenv("FACECHECK_FORCE_BROWSER_UI", "").strip() == "1"
     try:
-        import webview
+        if force_browser_ui:
+            webview = None
+        else:
+            import webview
     except ImportError:
+        webview = None
+
+    if webview is None:
         urls = [spec["url"] for spec in _window_specs(simulate_pi)]
-        print(f"[WEB UI] Chưa cài pywebview; mở trình duyệt tại {', '.join(urls)}")
+        print(f"[WEB UI] Mở giao diện trình duyệt tại {', '.join(urls)}")
         for window_url in urls:
             webbrowser.open(window_url)
         if not owns_server:
