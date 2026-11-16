@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pickle
 import math
 import re
 import threading
@@ -17,6 +16,7 @@ import cv2
 import numpy as np
 
 from door_service import DoorService
+from database import FaceCheckDatabase
 from config import (
     DATA_FACES_DIR,
     ENROLLMENT_EMBEDDING_SAMPLES,
@@ -33,7 +33,10 @@ from mixins.enrollment import EnrollmentMixin
 class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMixin):
     """Cầu nối trạng thái; quyết định AI vẫn chạy trong các mixin gốc."""
 
-    def __init__(self, load_ai: bool = True):
+    def __init__(
+        self, load_ai: bool = True,
+        database_path: str | Path = "data/facecheck.db",
+    ):
         self._lock = threading.RLock()
         self._event_version = 0
         self._started = False
@@ -91,9 +94,11 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
         self._is_kiosk_ui_idle = True
         self._fingerprint_access_state = None
         self._fingerprint_access_until = 0.0
+        self.database = FaceCheckDatabase(database_path)
         self.door_service = DoorService.from_environment(
             on_change=self._publish,
             on_event=self._on_door_event,
+            database_path=database_path,
         )
 
         self.enrollment_running = False
@@ -618,9 +623,11 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
         record = self._json_safe(record)
         with self._lock:
             self.attendance_history.insert(0, record)
-            del self.attendance_history[100:]
             self._attendance_history_version += 1
-            self._save_attendance_history()
+            try:
+                self.database.append_authentication_log(record)
+            except Exception as exc:
+                print(f"[HISTORY] Lỗi thêm bản ghi SQLite: {exc}")
             self._event_version += 1
 
     @staticmethod
@@ -1196,24 +1203,16 @@ class WebFaceCheckRuntime(AttendanceMixin, CameraMixin, EnrollmentMixin, CoreMix
 
     # ---------- Dữ liệu quản trị ----------
     def _read_profiles(self):
-        path = Path("data/embeddings.pkl")
-        if not path.exists():
-            return {}
-        with path.open("rb") as file:
-            profiles = pickle.load(file)
+        profiles = self.database.load_profiles()
         # Phòng thủ nhiều lớp: dữ liệu benchmark chỉ dùng đánh giá offline,
-        # kể cả file cũ có cờ bật cũng không được xuất hiện là gallery thật.
+        # kể cả dữ liệu cũ có cờ bật cũng không được xuất hiện là gallery thật.
         for profile in profiles.values():
             if profile.get("source") == "LFW benchmark":
                 profile["recognition_enabled"] = False
         return profiles
 
     def _write_profiles(self, profiles):
-        path = Path("data/embeddings.pkl")
-        temporary = path.with_suffix(".pkl.tmp")
-        with temporary.open("wb") as file:
-            pickle.dump(profiles, file)
-        temporary.replace(path)
+        self.database.replace_profiles(profiles)
         self.embeddings_cache = profiles
 
     def _profile_image(self, emp_id, profile=None):

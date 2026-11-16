@@ -14,6 +14,8 @@ from typing import Callable
 
 import paho.mqtt.client as mqtt
 
+from database import FaceCheckDatabase
+
 
 DEVICE_EVENT_TYPES = {
     "fingerprint_granted",
@@ -30,7 +32,10 @@ class DoorService:
     """Publish short-lived OPEN commands and track their ACK lifecycle."""
 
     @classmethod
-    def from_environment(cls, on_change=None, on_event=None):
+    def from_environment(
+        cls, on_change=None, on_event=None,
+        database_path: str | Path = "data/facecheck.db",
+    ):
         def number(name, default, cast=float):
             try:
                 return cast(os.getenv(name, str(default)))
@@ -51,8 +56,7 @@ class DoorService:
             cooldown_seconds=number("FACECHECK_DOOR_COOLDOWN_SECONDS", 8.0),
             face_exit_seconds=number("FACECHECK_DOOR_FACE_EXIT_SECONDS", 1.5),
             ack_timeout_seconds=number("FACECHECK_DOOR_ACK_TIMEOUT_SECONDS", 12.0),
-            event_history_path=Path("data/door_events.json"),
-            fingerprint_registry_path=Path("data/fingerprints.json"),
+            database_path=Path(database_path),
             on_change=on_change,
             on_event=on_event,
         )
@@ -71,6 +75,7 @@ class DoorService:
         face_exit_seconds: float = 1.5,
         ack_timeout_seconds: float = 12.0,
         management_timeout_seconds: float = 120.0,
+        database_path: str | Path | None = None,
         event_history_path: str | Path | None = None,
         fingerprint_registry_path: str | Path | None = None,
         max_events: int = 100,
@@ -99,6 +104,7 @@ class DoorService:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._watchdog_thread = None
+        self._database = FaceCheckDatabase(database_path) if database_path else None
         self._event_history_path = Path(event_history_path) if event_history_path else None
         self._fingerprint_registry_path = (
             Path(fingerprint_registry_path) if fingerprint_registry_path else None
@@ -142,6 +148,11 @@ class DoorService:
         self._load_fingerprint_registry()
 
     def _load_fingerprint_registry(self) -> None:
+        if self._database is not None:
+            self.fingerprint_registry = self._database.load_fingerprints(
+                self.device_id
+            )
+            return
         path = self._fingerprint_registry_path
         if path is None or not path.exists():
             return
@@ -157,6 +168,11 @@ class DoorService:
             print(f"[DOOR] Khong doc duoc danh sach van tay: {exc}")
 
     def _save_fingerprint_registry(self) -> None:
+        if self._database is not None:
+            self._database.replace_fingerprints(
+                self.device_id, self.fingerprint_registry
+            )
+            return
         path = self._fingerprint_registry_path
         if path is None:
             return
@@ -172,6 +188,9 @@ class DoorService:
             print(f"[DOOR] Khong luu duoc danh sach van tay: {exc}")
 
     def _load_events(self) -> None:
+        if self._database is not None:
+            self.recent_events = self._database.load_door_events(self.device_id)
+            return
         if self._event_history_path is None or not self._event_history_path.exists():
             return
         try:
@@ -184,6 +203,12 @@ class DoorService:
             print(f"[DOOR] Khong doc duoc lich su su kien: {exc}")
 
     def _save_events(self) -> None:
+        if self._database is not None:
+            if self.recent_events:
+                self._database.append_door_event(
+                    self.device_id, self.recent_events[-1]
+                )
+            return
         if self._event_history_path is None:
             return
         try:
@@ -447,7 +472,8 @@ class DoorService:
                 return
             event["received_at"] = datetime.now(timezone.utc).isoformat()
             self.recent_events.append(event)
-            del self.recent_events[:-self._max_events]
+            if self._database is None:
+                del self.recent_events[:-self._max_events]
             self._save_events()
             if event_type == "fingerprint_granted" and "fingerprint_id" in event:
                 key = str(event["fingerprint_id"])
@@ -490,6 +516,8 @@ class DoorService:
                 **payload,
                 "received_at": datetime.now(timezone.utc).isoformat(),
             }
+            if self._database is not None:
+                self._database.upsert_device_status(self.device_status)
         self._notify_change()
 
     def events(self) -> list[dict]:

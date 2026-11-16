@@ -1,7 +1,5 @@
 """Load AI models, embeddings, and attendance history for the web runtime."""
 
-import json
-import pickle
 import threading
 import re
 from pathlib import Path
@@ -20,11 +18,8 @@ class CoreMixin:
         Tự động đối chiếu và dọn dẹp các vector mồ côi (nhân viên đã bị xóa ảnh khỏi database).
         """
         try:
-            p = Path("data/embeddings.pkl")
-            if p.exists():
-                with open(p, "rb") as f:
-                    data = pickle.load(f)
-                    
+            data = self._read_profiles()
+            if data:
                 # Quét các ID nhân viên còn ảnh hợp lệ trong DATA_FACES_DIR
                 faces_dir = Path(DATA_FACES_DIR)
                 active_ids = set()
@@ -80,9 +75,8 @@ class CoreMixin:
                         need_resave = True
                         
                 if need_resave:
-                    with open(p, "wb") as f:
-                        pickle.dump(cleaned_data, f)
-                    print(f"[AI CACHE] Đã đồng bộ lại embeddings.pkl (còn {len(cleaned_data)} nhân viên hoạt động).")
+                    self._write_profiles(cleaned_data)
+                    print(f"[AI CACHE] Đã đồng bộ lại SQLite (còn {len(cleaned_data)} nhân viên hoạt động).")
                     
                 self.embeddings_cache = cleaned_data
             else:
@@ -92,39 +86,26 @@ class CoreMixin:
             self.embeddings_cache = {}
 
     def _load_attendance_history(self):
-        """Nạp lịch sử điểm danh từ file data/attendance_history.json."""
-        hist_file = Path("data/attendance_history.json")
-        if hist_file.exists():
-            try:
-                with open(hist_file, "r", encoding="utf-8") as f:
-                    history = json.load(f)
-                    sanitizer = getattr(self, "_json_safe", None)
-                    self.attendance_history = (
-                        sanitizer(history) if callable(sanitizer) else history
-                    )
-                    if self.attendance_history != history:
-                        self._save_attendance_history()
-                        print("[HISTORY] Da lam sach NaN/Infinity trong lich su.")
-                    return
-            except Exception as e:
-                print(f"[HISTORY] Lỗi đọc file lịch sử: {e}")
-        self.attendance_history = []
+        """Nạp toàn bộ lịch sử xác thực từ SQLite."""
+        try:
+            history = self.database.load_authentication_logs()
+            sanitizer = getattr(self, "_json_safe", None)
+            self.attendance_history = (
+                sanitizer(history) if callable(sanitizer) else history
+            )
+            if self.attendance_history != history:
+                self._save_attendance_history()
+                print("[HISTORY] Da lam sach NaN/Infinity trong SQLite.")
+        except Exception as exc:
+            print(f"[HISTORY] Lỗi đọc SQLite: {exc}")
+            self.attendance_history = []
 
     def _save_attendance_history(self):
-        """Lưu lịch sử điểm danh bền vững vào file data/attendance_history.json."""
+        """Lưu lịch sử xác thực bền vững vào SQLite."""
         try:
-            hist_file = Path("data/attendance_history.json")
-            hist_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(hist_file, "w", encoding="utf-8") as f:
-                json.dump(
-                    self.attendance_history,
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                    allow_nan=False,
-                )
-        except Exception as e:
-            print(f"[HISTORY] Lỗi lưu file lịch sử: {e}")
+            self.database.replace_authentication_logs(self.attendance_history)
+        except Exception as exc:
+            print(f"[HISTORY] Lỗi lưu SQLite: {exc}")
 
     def _warmup_deepface_async(self):
         """Khởi động sẵn ArcFace & YOLOv8 ngầm để tab Kiosk không bị đơ giật khi nhận diện lần đầu."""

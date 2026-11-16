@@ -15,11 +15,21 @@ import numpy as np
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from database import FaceCheckDatabase
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Hiệu chỉnh quyết định nhận diện ArcFace")
     parser.add_argument("--benchmark", type=Path, default=Path("data/benchmark_faces"))
-    parser.add_argument("--embeddings", type=Path, default=Path("data/embeddings.pkl"))
+    parser.add_argument("--database", type=Path, default=Path("data/facecheck.db"))
+    parser.add_argument(
+        "--embeddings", type=Path, default=None,
+        help="Tệp pickle cũ (chỉ dùng tương thích); mặc định đọc SQLite.",
+    )
     parser.add_argument(
         "--cache", type=Path,
         default=Path("data/benchmark_faces/evaluation_embeddings.pkl"),
@@ -177,8 +187,11 @@ def main() -> None:
     benchmark = args.benchmark.resolve()
     with (benchmark / "manifest.json").open("r", encoding="utf-8") as file:
         manifest = json.load(file)
-    with args.embeddings.open("rb") as file:
-        profiles = pickle.load(file)
+    if args.embeddings is not None:
+        with args.embeddings.open("rb") as file:
+            profiles = pickle.load(file)
+    else:
+        profiles = FaceCheckDatabase(args.database).load_profiles()
 
     gallery_ids = [f"LFW{index:03d}" for index in range(1, 91)]
     missing = [emp_id for emp_id in gallery_ids if emp_id not in profiles]

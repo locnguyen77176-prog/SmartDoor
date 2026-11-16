@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import pickle
 import re
 import shutil
 import sys
@@ -15,6 +14,12 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from database import FaceCheckDatabase
 
 
 EMPLOYEE_PROFILES = (
@@ -48,14 +53,6 @@ def safe_component(value: str, fallback: str) -> str:
     value = re.sub(r'[<>:"/\\|?*@]', "", value.strip())
     value = re.sub(r"\s+", "_", value)
     return value.strip("_") or fallback
-
-
-def save_embeddings(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".pkl.tmp")
-    with temporary.open("wb") as file:
-        pickle.dump(data, file)
-    temporary.replace(path)
 
 
 def load_face_detector():
@@ -102,12 +99,8 @@ def main() -> None:
     if not enrolled:
         raise SystemExit("Manifest không có danh tính enrolled")
 
-    embeddings_path = Path("data/embeddings.pkl")
-    if embeddings_path.exists():
-        with embeddings_path.open("rb") as file:
-            embeddings = pickle.load(file)
-    else:
-        embeddings = {}
+    database = FaceCheckDatabase(Path("data/facecheck.db"))
+    embeddings = database.load_profiles()
 
     from deepface import DeepFace
     detector = load_face_detector()
@@ -204,7 +197,7 @@ def main() -> None:
                 "benchmark_identity": person_id,
                 "recognition_enabled": recognition_enabled,
             }
-            save_embeddings(embeddings_path, embeddings)
+            database.replace_profiles(embeddings)
 
             # Chỉ dọn ảnh benchmark cũ sau khi hồ sơ mới đã được ghi bền vững.
             if existing_key is not None and args.replace:

@@ -1,7 +1,6 @@
 """Pipeline đăng ký khuôn mặt dùng chung cho web runtime."""
 
 import cv2
-import pickle
 import re
 import numpy as np
 from datetime import datetime
@@ -33,14 +32,11 @@ class EnrollmentMixin:
         return None
 
     def _find_existing_employee_id(self, emp_id):
-        """Kiểm tra mã trong dữ liệu trên đĩa và cache hiện tại."""
-        embeddings_file = Path("data/embeddings.pkl")
-        if embeddings_file.exists():
-            with open(embeddings_file, "rb") as file:
-                profiles = pickle.load(file)
-            duplicate = self._find_employee_id_in_profiles(profiles, emp_id)
-            if duplicate:
-                return duplicate
+        """Kiểm tra mã trong SQLite và cache hiện tại."""
+        profiles = self._read_profiles()
+        duplicate = self._find_employee_id_in_profiles(profiles, emp_id)
+        if duplicate:
+            return duplicate
 
         return self._find_employee_id_in_profiles(
             getattr(self, "embeddings_cache", {}), emp_id
@@ -100,16 +96,12 @@ class EnrollmentMixin:
 
             # Đọc lại nguồn dữ liệu chuẩn ngay trước lúc ghi để không ghi đè
             # nếu mã vừa được đăng ký bởi một thao tác khác.
-            embeddings_file = Path("data/embeddings.pkl")
-            embeddings_data = {}
-            if embeddings_file.exists():
-                try:
-                    with open(embeddings_file, "rb") as f:
-                        embeddings_data = pickle.load(f)
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"Không thể đọc dữ liệu nhân viên hiện tại: {exc}"
-                    ) from exc
+            try:
+                embeddings_data = self._read_profiles()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Không thể đọc dữ liệu nhân viên hiện tại: {exc}"
+                ) from exc
 
             duplicate_id = self._find_employee_id_in_profiles(
                 embeddings_data, emp_id
@@ -141,7 +133,7 @@ class EnrollmentMixin:
             except Exception:
                 cv2.imwrite(str(filepath_main), full_frame)
             
-            # --- 3. Lưu Vector vào embeddings.pkl ---
+            # --- 3. Lưu hồ sơ và vector vào SQLite ---
             embeddings_data[emp_id] = {
                 "id": emp_id,
                 "name": name,
@@ -155,13 +147,7 @@ class EnrollmentMixin:
                 "recognition_enabled": True,
             }
             
-            temporary_file = embeddings_file.with_suffix(".pkl.tmp")
-            with open(temporary_file, "wb") as f:
-                pickle.dump(embeddings_data, f)
-            temporary_file.replace(embeddings_file)
-                
-            # Cập nhật ngay cache embeddings trong RAM
-            self.embeddings_cache = embeddings_data
+            self._write_profiles(embeddings_data)
                 
             print(f"[AI WORKER] Trích xuất Vector & lưu thành công: {emp_id} - {name} ({filepath_main})")
             

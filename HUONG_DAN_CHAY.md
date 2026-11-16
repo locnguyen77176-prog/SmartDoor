@@ -97,6 +97,8 @@ models/blaze_face_short_range.tflite
 
 ### 3.3 Sao lưu dữ liệu hệ thống
 
+Thoát hẳn FaceCheck trên máy cũ trước khi sao chép để database SQLite ở trạng thái nhất quán.
+
 ```powershell
 Copy-Item -Path "$projectRoot\data\*" -Destination "$backupRoot\data" -Recurse -Force
 ```
@@ -104,22 +106,18 @@ Copy-Item -Path "$projectRoot\data\*" -Destination "$backupRoot\data" -Recurse -
 Các dữ liệu quan trọng nhất:
 
 ```text
-data/embeddings.pkl
+data/facecheck.db
 data/faces/
-data/fingerprints.json
-data/attendance_history.json
-data/door_events.json
 ```
 
 Ý nghĩa:
 
 | Đường dẫn | Nội dung |
 |---|---|
-| `embeddings.pkl` | Hồ sơ và vector ArcFace của nhân viên |
+| `facecheck.db` | SQLite chứa hồ sơ, vector ArcFace, registry vân tay, lịch sử xác thực và sự kiện cửa |
 | `faces/` | Ảnh đại diện khuôn mặt |
-| `fingerprints.json` | ID vân tay và danh tính quản lý trên server |
-| `attendance_history.json` | Lịch sử xác thực |
-| `door_events.json` | Lịch sử sự kiện ESP32-S3 cửa |
+
+Các tệp JSON/Pickle cũ có thể có trong thư mục sao lưu, nhưng server phiên bản hiện tại không dùng chúng làm nguồn dữ liệu vận hành.
 
 ### 3.4 Sao lưu secrets firmware
 
@@ -173,7 +171,7 @@ git status
 Nếu README hoặc source vẫn đang ở trạng thái modified/untracked, cần commit và push:
 
 ```powershell
-git add README.md HUONG_DAN_CHAY_TREN_MAY_KHAC.md
+git add README.md HUONG_DAN_CHAY.md
 git commit -m "Cap nhat tai lieu cai dat va chuyen may"
 git push origin main
 ```
@@ -350,9 +348,8 @@ Nếu IP laptop thay đổi, firmware TFT cũng phải trỏ đến IP mới ho�
 $requiredPaths = @(
     "D:\FaceCheck\models\model.pt",
     "D:\FaceCheck\models\blaze_face_short_range.tflite",
-    "D:\FaceCheck\data\embeddings.pkl",
+    "D:\FaceCheck\data\facecheck.db",
     "D:\FaceCheck\data\faces",
-    "D:\FaceCheck\data\fingerprints.json",
     "D:\FaceCheck\.env"
 )
 
@@ -531,7 +528,7 @@ Màn hình TFT:
 
 ## 17. Đồng bộ tên vân tay trên máy mới
 
-Sau khi khôi phục `data/fingerprints.json`:
+Sau khi khôi phục `data/facecheck.db`:
 
 1. bật ESP32-S3 cửa;
 2. bật server trên máy mới;
@@ -540,7 +537,7 @@ Sau khi khôi phục `data/fingerprints.json`:
 5. kiểm tra log server có thông báo đồng bộ tên vân tay;
 6. thử quét một vân tay đã đăng ký và kiểm tra Telegram.
 
-Nếu không khôi phục `fingerprints.json`, AS608 vẫn nhận được mẫu cũ nhưng server không biết tên tương ứng. Không nên đăng ký đè lên ID cũ trước khi kiểm tra registry.
+Nếu không khôi phục bảng `fingerprints` trong database, AS608 vẫn nhận được mẫu cũ nhưng server không biết tên tương ứng. Không nên đăng ký đè lên ID cũ trước khi kiểm tra registry.
 
 ## 18. Chạy kiểm thử trên máy mới
 
@@ -613,7 +610,7 @@ Thư mục `models/` không có trên GitHub. Khôi phục từ bản sao lưu.
 
 ### Giao diện có nhân viên nhưng không nhận diện được
 
-Kiểm tra đồng thời `data/embeddings.pkl` và `data/faces/`. Hai phần phải được sao lưu cùng nhau.
+Kiểm tra đồng thời `data/facecheck.db` và `data/faces/`. Hai phần phải được sao lưu cùng nhau.
 
 ### Camera Wi-Fi không tìm thấy
 

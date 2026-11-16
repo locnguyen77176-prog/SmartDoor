@@ -11,11 +11,17 @@ from pathlib import Path
 
 import numpy as np
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from database import FaceCheckDatabase
+
 
 BENCHMARK = Path("data/benchmark_faces")
 MANIFEST = BENCHMARK / "manifest.json"
 PROBE_CACHE = BENCHMARK / "evaluation_embeddings.pkl"
-EMBEDDINGS = Path("data/embeddings.pkl")
+DATABASE = Path("data/facecheck.db")
 
 
 def normalized(vector) -> np.ndarray:
@@ -30,8 +36,7 @@ def main() -> None:
         manifest = json.load(file)
     with PROBE_CACHE.open("rb") as file:
         probes = pickle.load(file)
-    with EMBEDDINGS.open("rb") as file:
-        profiles = pickle.load(file)
+    profiles = FaceCheckDatabase(DATABASE).load_profiles()
 
     probes_by_id = defaultdict(list)
     for probe in probes:

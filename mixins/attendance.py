@@ -640,7 +640,7 @@ class AttendanceMixin:
         """
         Luồng xử lý ngầm (_ai_worker_recognize):
         - Nhận ảnh crop từ YOLO, chạy DeepFace.represent(img_path=cropped_img, model_name='ArcFace', enforce_detection=False).
-        - Duyệt qua file embeddings.pkl, tính khoảng cách Cosine với toàn bộ nhân viên.
+        - Duyệt hồ sơ embedding trong SQLite, tính khoảng cách Cosine với toàn bộ nhân viên.
         - Chỉ chấp nhận khi Top 1 đạt threshold và cách Top 2 đủ margin.
         - Dùng self.after để gọi hàm cập nhật UI.
         """
@@ -683,7 +683,7 @@ class AttendanceMixin:
                 self._safe_after(0, self._on_kiosk_recognition_failed, 1.0)
                 return
 
-            # 3. Duyệt qua file embeddings.pkl, tính khoảng cách Cosine với toàn bộ nhân viên
+            # 3. Duyệt cache embedding nạp từ SQLite và tính khoảng cách Cosine
             ranked_matches = []
             
             for emp_id, emp_info in embeddings_data.items():

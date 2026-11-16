@@ -2,10 +2,24 @@ from __future__ import annotations
 
 import time
 import json
+import shutil
+import tempfile
 import unittest
+import weakref
+from pathlib import Path
 from unittest.mock import Mock, patch
 
-from web_runtime import WebFaceCheckRuntime
+from web_runtime import WebFaceCheckRuntime as Runtime
+
+
+def WebFaceCheckRuntime(*args, **kwargs):
+    directory = Path(tempfile.mkdtemp(prefix="facecheck-test-"))
+    kwargs["database_path"] = directory / "facecheck.db"
+    runtime = Runtime(*args, **kwargs)
+    runtime._test_database_finalizer = weakref.finalize(
+        runtime, shutil.rmtree, directory, True,
+    )
+    return runtime
 
 
 class DoorRuntimeIntegrationTests(unittest.TestCase):

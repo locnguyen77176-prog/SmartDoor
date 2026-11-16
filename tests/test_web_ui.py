@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import time
 import unittest
+import weakref
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
@@ -18,7 +22,7 @@ os.environ["FACECHECK_WEB_SKIP_AI"] = "1"
 os.environ["FACECHECK_DISPLAY_TOKEN"] = "test-display-token"
 
 from web_backend.app import app, display_app  # noqa: E402
-from web_runtime import WebFaceCheckRuntime  # noqa: E402
+from web_runtime import WebFaceCheckRuntime as Runtime  # noqa: E402
 from web_admin import (  # noqa: E402
     _parse_args as parse_web_admin_args,
     _reserve_server_socket,
@@ -32,6 +36,16 @@ from mixins.attendance import (  # noqa: E402
     AttendanceMixin, aggregate_query_embeddings, calculate_profile_distance,
     profile_is_live_recognition_enabled,
 )
+
+
+def WebFaceCheckRuntime(*args, **kwargs):
+    directory = Path(tempfile.mkdtemp(prefix="facecheck-test-"))
+    kwargs["database_path"] = directory / "facecheck.db"
+    runtime = Runtime(*args, **kwargs)
+    runtime._test_database_finalizer = weakref.finalize(
+        runtime, shutil.rmtree, directory, True,
+    )
+    return runtime
 
 
 class RecognitionPolicyTests(unittest.TestCase):
@@ -249,7 +263,7 @@ class WebUiSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(forbidden, source)
 
     async def test_recent_history_does_not_mark_full_history_cache_fresh(self):
-        source = (await self.client.get("/js/app.js")).text
+        source = (await self.client.get("/js/app.js")).text.replace("\r\n", "\n")
         start = source.index("async function loadRecent()")
         end = source.index("\n}\n", start) + 2
         load_recent = source[start:end]
